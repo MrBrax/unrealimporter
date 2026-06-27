@@ -1,7 +1,14 @@
 {
-  "Title": "unreal_importer",
+  "Title": "Unreal 5 Importer",
   "Type": "library",
-  "Org": "local",
+  "Org": "brax",
   "Ident": "unrealimporter",
-  "Schema": 1
+  "Schema": 1,
+  "IncludeSourceFiles": false,
+  "Resources": null,
+  "PackageReferences": [],
+  "EditorReferences": null,
+  "Mounts": null,
+  "IsStandaloneOnly": false,
+  "Metadata": {}
 }
