@@ -12,6 +12,7 @@ namespace Editor.UnrealImporter;
 ///
 /// TODO: max texture resolution selection
 /// TODO: make async with progress bar
+/// TODO: tint masks
 /// </summary>
 [EditorApp( "Unreal Importer", "move_to_inbox", "Import Unreal / Fab static meshes into s&box" )]
 public class UnrealImportWindow : Widget
