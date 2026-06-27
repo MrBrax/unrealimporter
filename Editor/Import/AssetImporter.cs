@@ -21,7 +21,8 @@ public class ImportSummary
 /// </summary>
 public static class AssetImporter
 {
-	public static ImportSummary Import( ImportManifest manifest, string stagingDir, string outputRoot )
+	/// <param name="flat">When true, everything goes directly in outputRoot instead of models/materials/textures subfolders.</param>
+	public static ImportSummary Import( ImportManifest manifest, string stagingDir, string outputRoot, bool flat = false )
 	{
 		var summary = new ImportSummary { OutputDir = outputRoot };
 
@@ -29,9 +30,9 @@ public static class AssetImporter
 		if ( string.IsNullOrEmpty( assetsDir ) )
 			throw new Exception( "Could not resolve the project's Assets folder. Pick an output folder inside Assets/." );
 
-		var modelsDir = Path.Combine( outputRoot, "models" );
-		var materialsDir = Path.Combine( outputRoot, "materials" );
-		var texturesDir = Path.Combine( outputRoot, "textures" );
+		var modelsDir = flat ? outputRoot : Path.Combine( outputRoot, "models" );
+		var materialsDir = flat ? outputRoot : Path.Combine( outputRoot, "materials" );
+		var texturesDir = flat ? outputRoot : Path.Combine( outputRoot, "textures" );
 		Directory.CreateDirectory( modelsDir );
 		Directory.CreateDirectory( materialsDir );
 		Directory.CreateDirectory( texturesDir );

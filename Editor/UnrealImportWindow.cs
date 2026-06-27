@@ -31,6 +31,7 @@ public class UnrealImportWindow : Widget
 	Label statusLabel;
 	ScrollArea listScroll;
 	Button exportButton;
+	Checkbox flatCheckbox;
 
 	public UnrealImportWindow() : this( null ) { }
 
@@ -90,6 +91,9 @@ public class UnrealImportWindow : Widget
 			row.Add( browse );
 			Layout.Add( row );
 		}
+
+		flatCheckbox = new Checkbox( "Flat output (no models/materials/textures subfolders)", this ) { Value = false };
+		Layout.Add( flatCheckbox );
 
 		statusLabel = new Label( "", this );
 		statusLabel.Color = Theme.TextControl.WithAlpha( 0.6f );
@@ -280,7 +284,7 @@ public class UnrealImportWindow : Widget
 			}
 
 			var manifest = ImportManifest.Load( export.ManifestPath );
-			var summary = AssetImporter.Import( manifest, export.StagingDir, outputFolder );
+			var summary = AssetImporter.Import( manifest, export.StagingDir, outputFolder, flatCheckbox is not null && flatCheckbox.Value );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n\n" +
 				$"Output:\n{summary.OutputDir}";
