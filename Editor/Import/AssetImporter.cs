@@ -65,7 +65,11 @@ public static class AssetImporter
 			foreach ( var mat in asset.Materials )
 			{
 				var baseName = MaterialBaseName( mat );
-				var slot = string.IsNullOrEmpty( mat.Slot ) ? baseName : mat.Slot;
+
+				// s&box reads the FBX material *node* name, which Unreal writes as the assigned
+				// material (the MI, e.g. "MI_OilBarrel_01a") - NOT the DCC slot label ("lambert2",
+				// which ends up unused). So the remap must key off the material name.
+				var remapKey = !string.IsNullOrEmpty( mat.Material ) ? mat.Material : mat.Slot;
 
 				if ( !writtenVmats.TryGetValue( baseName, out var vmatContent ) )
 				{
@@ -88,7 +92,7 @@ public static class AssetImporter
 					writtenVmats[baseName] = vmatContent;
 				}
 
-				remaps.Add( (slot, vmatContent) );
+				remaps.Add( (remapKey, vmatContent) );
 			}
 
 			// Write the model.
