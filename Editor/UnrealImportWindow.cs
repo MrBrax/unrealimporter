@@ -10,9 +10,8 @@ namespace Editor.UnrealImporter;
 /// Editor tool: pick an Unreal project folder, tick the static meshes to bring over, and export
 /// them to sbox (FBX + vmat + vmdl) via a headless Unreal pass + kv3 generation.
 ///
-/// TODO: exporter should select the source mesh, currently it uses one of the lods
-/// TODO: space lods further apart
-/// TODO: translucent instead of alpha test
+/// TODO: max texture resolution selection
+/// TODO: make async with progress bar
 /// </summary>
 [EditorApp( "Unreal Importer", "move_to_inbox", "Import Unreal / Fab static meshes into s&box" )]
 public class UnrealImportWindow : Widget

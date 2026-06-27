@@ -26,14 +26,19 @@ public static class Kv3Writer
 		sb.AppendLine( "\tshader \"shaders/complex.shader\"" );
 		sb.AppendLine();
 		sb.AppendLine( "\t//---- PBR ----" );
-		sb.AppendLine( "\tF_METALNESS_TEXTURE 1" );
+
+		if ( !string.IsNullOrEmpty( metallic ) )
+		{
+			sb.AppendLine( "\tF_METALNESS_TEXTURE 1" );
+		}
+		
 		sb.AppendLine( "\tF_SPECULAR 1" );
 
 		if ( !string.IsNullOrEmpty( alpha ) )
 		{
 			sb.AppendLine();
 			sb.AppendLine( "\t//---- Alpha ----" );
-			sb.AppendLine( "\tF_ALPHA_TEST 1" );
+			sb.AppendLine( "\tF_TRANSLUCENT 1" );
 			sb.AppendLine( $"\tTextureTranslucency \"{alpha}\"" );
 		}
 
@@ -188,10 +193,10 @@ public static class Kv3Writer
 		var lods = new (float thr, int mode, float red, bool lockBorder, bool permissive, bool protectUv, bool hasMesh)[]
 		{
 			( 0.0f, 0, 0.5f, true, false, true, true ),
-			( 15.0f, 1, 0.5f, true, false, true, false ),
-			( 25.0f, 1, 0.5f, false, true, true, false ),
-			( 50.0f, 1, 0.45f, false, true, false, false ),
-			( 70.0f, 1, 0.4f, false, true, false, false ),
+			( 25.0f, 1, 0.5f, true, false, true, false ),
+			( 40.0f, 1, 0.5f, false, true, true, false ),
+			( 60.0f, 1, 0.45f, false, true, false, false ),
+			( 80.0f, 1, 0.4f, false, true, false, false ),
 		};
 
 		sb.AppendLine( "\t\t\t{" );

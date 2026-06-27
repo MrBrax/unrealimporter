@@ -23,7 +23,7 @@ Example command line (PowerShell):
   $env:UE_EXPORT_OUT   = "C:\\Temp\\ue_stage"
   $env:UE_EXPORT_PATHS = "/Game/Construction_VOL1/Meshes"
   & "C:\\Program Files\\Epic Games\\UE_5.5\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe" `
-      "C:\\Users\\Braxen\\Documents\\Unreal Projects\\ripper_5_4\\ripper_5_4.uproject" `
+      "C:\\Users\\Profile\\Documents\\Unreal Projects\\ripper_5_4\\ripper_5_4.uproject" `
       -run=pythonscript -script="<this file>" `
       -EnablePlugins=PythonScriptPlugin -unattended -nosplash -nullrhi
 """
@@ -118,6 +118,7 @@ def fbx_options():
     opt.collision = False
     opt.level_of_detail = False     # export LOD0 only; s&box auto-LOD handles the rest
     opt.vertex_color = True
+    opt.export_source_mesh = True
     return opt
 
 
