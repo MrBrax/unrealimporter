@@ -13,10 +13,33 @@ public static class Kv3Writer
 	static string F( float v ) => v.ToString( "0.0######", CultureInfo.InvariantCulture );
 
 	/// <summary>
+	/// Format an Unreal LINEAR tint color as g_vColorTint's "[r g b a]" string.
+	/// g_vColorTint is sRGB-gamma in the shader (it does SrgbGammaToLinear), so we sRGB-encode
+	/// Unreal's linear value. Null/missing -> white (no tint).
+	/// </summary>
+	static string ColorTint( float[] c )
+	{
+		if ( c is null || c.Length < 3 )
+			return "[1.000000 1.000000 1.000000 0.000000]";
+
+		float r = LinearToSrgb( c[0] ), g = LinearToSrgb( c[1] ), b = LinearToSrgb( c[2] );
+		return $"[{r.ToString( "0.000000", CultureInfo.InvariantCulture )} " +
+			$"{g.ToString( "0.000000", CultureInfo.InvariantCulture )} " +
+			$"{b.ToString( "0.000000", CultureInfo.InvariantCulture )} 0.000000]";
+	}
+
+	static float LinearToSrgb( float c )
+	{
+		c = System.Math.Clamp( c, 0f, 1f );
+		return c <= 0.0031308f ? c * 12.92f : 1.055f * System.MathF.Pow( c, 1f / 2.4f ) - 0.055f;
+	}
+
+	/// <summary>
 	/// A complex.shader material. Texture arguments are Content-relative paths (forward slashes),
 	/// or null to omit that slot.
 	/// </summary>
-	public static string VmatText( string color, string normal, string roughness, string metallic, string ao, string alpha = null )
+	public static string VmatText( string color, string normal, string roughness, string metallic, string ao, string alpha = null,
+		string tintMask = null, float[] tintColor = null, float? tintAmount = null )
 	{
 		var sb = new StringBuilder();
 		sb.AppendLine( "// THIS FILE IS AUTO-GENERATED (unreal_importer)" );
@@ -33,6 +56,11 @@ public static class Kv3Writer
 		}
 		
 		sb.AppendLine( "\tF_SPECULAR 1" );
+		
+		if ( !string.IsNullOrEmpty( tintMask ) )
+		{
+			sb.AppendLine( "\tF_TINT_MASK 1" );
+		}
 
 		if ( !string.IsNullOrEmpty( alpha ) )
 		{
@@ -53,10 +81,17 @@ public static class Kv3Writer
 
 		sb.AppendLine();
 		sb.AppendLine( "\t//---- Color ----" );
-		sb.AppendLine( "\tg_flModelTintAmount \"1.000\"" );
-		sb.AppendLine( "\tg_vColorTint \"[1.000000 1.000000 1.000000 0.000000]\"" );
+		sb.AppendLine( $"\tg_flModelTintAmount \"{F( tintAmount ?? 1.0f )}\"" );
+		sb.AppendLine( $"\tg_vColorTint \"{ColorTint( tintColor )}\"" );
 		if ( !string.IsNullOrEmpty( color ) )
 			sb.AppendLine( $"\tTextureColor \"{color}\"" );
+
+		if ( !string.IsNullOrEmpty( tintMask ) )
+		{
+			sb.AppendLine();
+			sb.AppendLine( "\t//---- Tint Mask ----" );
+			sb.AppendLine( $"\tTextureTintMask \"{tintMask}\"" );
+		}
 
 		sb.AppendLine();
 		sb.AppendLine( "\t//---- Fog ----" );

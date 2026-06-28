@@ -15,6 +15,7 @@ public class ProcessedTextures
 	public string Metallic;
 	public string Ao;
 	public string Emissive;
+	public string TintMask;
 }
 
 /// <summary>
@@ -69,6 +70,14 @@ public static class TextureProcessor
 		ProcessSingle( mat.Metal, stagingDir, outputTextureDir, baseName, "metallic", ref result.Metallic );
 		ProcessSingle( mat.Ao, stagingDir, outputTextureDir, baseName, "ao", ref result.Ao );
 		ProcessSingle( mat.Emissive, stagingDir, outputTextureDir, baseName, "emissive", ref result.Emissive );
+
+		// --- Tint mask (grayscale; complex shader packs it into the normal's alpha) ---
+		if ( !string.IsNullOrEmpty( mat.TintMask ) )
+		{
+			using var mask = Load( stagingDir, mat.TintMask );
+			if ( mask is not null )
+				result.TintMask = Save( ExtractChannel( mask, 0 ), outputTextureDir, baseName, "tintmask", dispose: true );
+		}
 
 		return result;
 	}

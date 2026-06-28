@@ -89,7 +89,10 @@ public static class AssetImporter
 						roughness: TexContent( assetsDir, texturesDir, tex.Roughness ),
 						metallic: TexContent( assetsDir, texturesDir, tex.Metallic ),
 						ao: TexContent( assetsDir, texturesDir, tex.Ao ),
-						alpha: TexContent( assetsDir, texturesDir, tex.Alpha ) );
+						alpha: TexContent( assetsDir, texturesDir, tex.Alpha ),
+						tintMask: TexContent( assetsDir, texturesDir, tex.TintMask ),
+						tintColor: mat.TintColor,
+						tintAmount: mat.TintAmount );
 
 					var vmatPath = Path.Combine( materialsDir, baseName + ".vmat" );
 					await File.WriteAllTextAsync( vmatPath, vmatText, progressToken );
@@ -122,6 +125,7 @@ public static class AssetImporter
 		if ( t.Metallic != null ) n++;
 		if ( t.Ao != null ) n++;
 		if ( t.Emissive != null ) n++;
+		if ( t.TintMask != null ) n++;
 		return n;
 	}
 

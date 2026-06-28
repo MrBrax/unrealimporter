@@ -81,6 +81,33 @@ def classify_texture(name):
     return None
 
 
+def classify_param_name(pname):
+    """Return a role from a material *parameter* name (more reliable than the filename), or None."""
+    p = (pname or "").lower().replace(" ", "").replace("_", "")
+    if not p:
+        return None
+    # tint / color mask first (otherwise "mask" or "color" would mis-route)
+    if ("tint" in p and "mask" in p) or "colormask" in p or "tintmask" in p:
+        return "tintmask"
+    if "normal" in p:
+        return "nrm"
+    if "rma" in p or "orm" in p or "arm" in p or "mra" in p:
+        return "rma"
+    if "basecolor" in p or "albedo" in p or "diffuse" in p or p in ("color", "basecolour"):
+        return "alb"
+    if "roughness" in p:
+        return "rough"
+    if "metallic" in p or "metalness" in p:
+        return "metal"
+    if "ambientocclusion" in p or "occlusion" in p or p == "ao":
+        return "ao"
+    if "emissive" in p or "emission" in p:
+        return "emissive"
+    if "opacity" in p or "alpha" in p:
+        return "opacity"
+    return None
+
+
 def package_relpath(asset):
     """'/Game/Foo/Bar/SM_X.SM_X' -> 'Foo/Bar/SM_X' (forward slashes, no /Game)."""
     p = asset.get_path_name()          # /Game/Foo/Bar/SM_X.SM_X
@@ -150,8 +177,17 @@ def load_static_meshes(asset_paths):
     return found
 
 
+def _param_name(struct):
+    """Pull the parameter name out of a *ParameterValue struct's parameter_info."""
+    try:
+        info = struct.get_editor_property("parameter_info")
+        return str(info.get_editor_property("name"))
+    except Exception:
+        return ""
+
+
 def textures_from_instance(mi):
-    """Textures a MaterialInstance overrides, as a list of unreal.Texture (deduped)."""
+    """(param_name, texture) pairs a MaterialInstance overrides (deduped by texture)."""
     out, seen = [], set()
     try:
         tpvs = mi.get_editor_property("texture_parameter_values")
@@ -161,8 +197,66 @@ def textures_from_instance(mi):
         tex = tpv.get_editor_property("parameter_value")
         if tex and tex.get_path_name() not in seen:
             seen.add(tex.get_path_name())
-            out.append(tex)
+            out.append((_param_name(tpv), tex))
     return out
+
+
+def scalars_from_instance(mi):
+    """{param_name: float} scalar overrides on a MaterialInstance."""
+    out = {}
+    try:
+        svs = mi.get_editor_property("scalar_parameter_values")
+    except Exception:
+        svs = []
+    for sv in svs or []:
+        name = _param_name(sv)
+        if not name:
+            continue
+        try:
+            out[name] = float(sv.get_editor_property("parameter_value"))
+        except Exception:
+            pass
+    return out
+
+
+def vectors_from_instance(mi):
+    """{param_name: [r,g,b,a]} vector (LinearColor) overrides on a MaterialInstance."""
+    out = {}
+    try:
+        vvs = mi.get_editor_property("vector_parameter_values")
+    except Exception:
+        vvs = []
+    for vv in vvs or []:
+        name = _param_name(vv)
+        if not name:
+            continue
+        try:
+            c = vv.get_editor_property("parameter_value")  # unreal.LinearColor
+            out[name] = [c.r, c.g, c.b, c.a]
+        except Exception:
+            pass
+    return out
+
+
+def pick_tint_color(vectors):
+    """Best-guess tint color from vector params: prefer a 'tint' param, else a 'color' one."""
+    fallback = None
+    for name, val in vectors.items():
+        n = name.lower()
+        if "tint" in n:
+            return val
+        if fallback is None and "color" in n and "mask" not in n:
+            fallback = val
+    return fallback
+
+
+def pick_tint_amount(scalars):
+    """Best-guess tint amount/strength from scalar params, or None."""
+    for name, val in scalars.items():
+        n = name.lower()
+        if "tint" in n and ("amount" in n or "strength" in n or "opacity" in n or "intensity" in n):
+            return val
+    return None
 
 
 def textures_from_dependencies(mi):
@@ -196,16 +290,32 @@ def texture_bindings_for_mesh(mesh, out_dir, exported_textures):
             materials.append(entry)
             continue
 
-        texs = textures_from_instance(mi)
-        if not texs:
-            texs = textures_from_dependencies(mi)
+        named_texs = textures_from_instance(mi)
+        if not named_texs:
+            named_texs = [("", t) for t in textures_from_dependencies(mi)]
         log("  slot='{}' mi='{}' textures={}".format(
-            slot, mi.get_name(), [t.get_name() for t in texs]))
+            slot, mi.get_name(), [t.get_name() for _, t in named_texs]))
 
-        for tex in texs:
-            role = classify_texture(tex.get_name())
+        # Scalar/vector params: keep the full set for fidelity, plus a best-guess tint.
+        scalars = scalars_from_instance(mi)
+        vectors = vectors_from_instance(mi)
+        if scalars:
+            entry["scalar_params"] = scalars
+        if vectors:
+            entry["vector_params"] = vectors
+        tint_color = pick_tint_color(vectors)
+        if tint_color is not None:
+            entry["tint_color"] = tint_color
+            log("    tint_color={}".format(tint_color))
+        tint_amount = pick_tint_amount(scalars)
+        if tint_amount is not None:
+            entry["tint_amount"] = tint_amount
+
+        for pname, tex in named_texs:
+            # The parameter name (e.g. "Tint Mask") is more reliable than the filename suffix.
+            role = classify_param_name(pname) or classify_texture(tex.get_name())
             if role is None:
-                warn("    unclassified texture '{}' (skipped)".format(tex.get_name()))
+                warn("    unclassified texture '{}' (param '{}') (skipped)".format(tex.get_name(), pname))
                 continue
             key = tex.get_path_name()
             if key not in exported_textures:

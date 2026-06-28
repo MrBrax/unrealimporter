@@ -45,4 +45,19 @@ public class ManifestMaterial
 	[JsonPropertyName( "ao" )] public string Ao { get; set; }
 	[JsonPropertyName( "emissive" )] public string Emissive { get; set; }
 	[JsonPropertyName( "opacity" )] public string Opacity { get; set; }
+
+	/// <summary>Grayscale tint mask (white = full tint). Packed into the normal's alpha by the complex shader.</summary>
+	[JsonPropertyName( "tintmask" )] public string TintMask { get; set; }
+
+	/// <summary>Best-guess tint color [r,g,b,a] in Unreal LINEAR space (sRGB-encode for g_vColorTint).</summary>
+	[JsonPropertyName( "tint_color" )] public float[] TintColor { get; set; }
+
+	/// <summary>Best-guess tint amount/strength (0..1) -> g_flModelTintAmount.</summary>
+	[JsonPropertyName( "tint_amount" )] public float? TintAmount { get; set; }
+
+	/// <summary>All scalar parameter overrides on the Material Instance (kept for fidelity).</summary>
+	[JsonPropertyName( "scalar_params" )] public Dictionary<string, float> ScalarParams { get; set; }
+
+	/// <summary>All vector (color) parameter overrides [r,g,b,a] on the Material Instance.</summary>
+	[JsonPropertyName( "vector_params" )] public Dictionary<string, float[]> VectorParams { get; set; }
 }
