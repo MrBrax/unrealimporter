@@ -90,10 +90,12 @@ public static class AssetImporter
 						metallic: TexContent( assetsDir, texturesDir, tex.Metallic ),
 						ao: TexContent( assetsDir, texturesDir, tex.Ao ),
 						alpha: TexContent( assetsDir, texturesDir, tex.Alpha ),
-						// Multi-zone tints are baked into Color; don't re-tint in the shader.
-						tintMask: tex.TintBaked ? null : TexContent( assetsDir, texturesDir, tex.TintMask ),
-						tintColor: tex.TintBaked ? null : mat.TintColor,
-						tintAmount: tex.TintBaked ? null : mat.TintAmount );
+						// Tint stays INERT by default (white) so the albedo's own colours show through.
+						// The mask + captured tint colours are emitted for optional manual recolouring.
+						tintMask: TexContent( assetsDir, texturesDir, tex.TintMask ),
+						tintColor: null,
+						tintAmount: null,
+						tintComment: TintComment( mat ) );
 
 					var vmatPath = Path.Combine( materialsDir, baseName + ".vmat" );
 					await File.WriteAllTextAsync( vmatPath, vmatText, progressToken );
@@ -114,6 +116,33 @@ public static class AssetImporter
 		}
 
 		return summary;
+	}
+
+	/// <summary>Human-readable note of the tint colours Unreal had, so they can be wired up by hand.</summary>
+	static string TintComment( ManifestMaterial mat )
+	{
+		var parts = new List<string>();
+		if ( mat.TintColor is not null )
+			parts.Add( $"tint=[{FmtColor( mat.TintColor )}]" );
+		if ( mat.TintZones is not null )
+			foreach ( var kv in mat.TintZones )
+				parts.Add( $"{kv.Key}=[{FmtColor( kv.Value )}]" );
+
+		return parts.Count == 0 ? null : "Captured Unreal tint (NOT auto-applied; set g_vColorTint to use): " + string.Join( ", ", parts );
+	}
+
+	static string FmtColor( float[] c )
+	{
+		if ( c is null )
+			return "";
+
+		var sb = new StringBuilder();
+		for ( int i = 0; i < c.Length; i++ )
+		{
+			if ( i > 0 ) sb.Append( ' ' );
+			sb.Append( c[i].ToString( "0.###", System.Globalization.CultureInfo.InvariantCulture ) );
+		}
+		return sb.ToString();
 	}
 
 	static int CountTextures( ProcessedTextures t )

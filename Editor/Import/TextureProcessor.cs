@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using Sandbox;
 
@@ -18,9 +17,6 @@ public class ProcessedTextures
 	public string Ao;
 	public string Emissive;
 	public string TintMask;
-
-	/// <summary>True when multi-zone tints were baked into Color (so the vmat must NOT re-tint).</summary>
-	public bool TintBaked;
 }
 
 /// <summary>
@@ -43,16 +39,10 @@ public static class TextureProcessor
 			using var alb = Load( stagingDir, mat.Alb );
 			if ( alb is not null )
 			{
-				// Multi-zone tint masks (per-channel tint colors) can't be expressed by the
-				// single-tint complex shader, so bake them straight into the albedo - this is
-				// what Unreal renders. Single uniform tints stay dynamic (handled in the vmat).
-				if ( mat.TintZones is { Count: > 0 } )
-				{
-					using var mask = string.IsNullOrEmpty( mat.TintMask ) ? null : Load( stagingDir, mat.TintMask );
-					BakeTintZones( alb, mask, mat.TintZones, mat.ScalarParams );
-					result.TintBaked = true;
-				}
-
+				// Export the albedo UNTOUCHED. Fab/Megascans albedos already contain the final
+				// colours; the material's tint mask + tint colours are an OPTIONAL runtime-recolour
+				// system (team colours / variants). Baking them here double-colours and corrupts
+				// the result, so we keep the albedo pristine and leave tint inert in the vmat.
 				result.Color = Save( alb, outputTextureDir, baseName, "color" );
 
 				if ( !alb.IsOpaque() )
@@ -86,13 +76,14 @@ public static class TextureProcessor
 		ProcessSingle( mat.Ao, stagingDir, outputTextureDir, baseName, "ao", ref result.Ao );
 		ProcessSingle( mat.Emissive, stagingDir, outputTextureDir, baseName, "emissive", ref result.Emissive );
 
-		// --- Tint mask (grayscale; complex shader packs it into the normal's alpha) ---
-		// Only when not already baked into the albedo above.
-		if ( !result.TintBaked && !string.IsNullOrEmpty( mat.TintMask ) )
+		// --- Tint mask (grayscale) - export the populated channel so it can drive optional
+		// runtime tinting. Masks are single-channel but the data isn't always in R (this ATV
+		// mask lives in B), so pick whichever channel actually carries data.
+		if ( !string.IsNullOrEmpty( mat.TintMask ) )
 		{
 			using var mask = Load( stagingDir, mat.TintMask );
 			if ( mask is not null )
-				result.TintMask = Save( ExtractChannel( mask, 0 ), outputTextureDir, baseName, "tintmask", dispose: true );
+				result.TintMask = Save( ExtractChannel( mask, DominantChannel( mask ) ), outputTextureDir, baseName, "tintmask", dispose: true );
 		}
 
 		return result;
@@ -128,82 +119,26 @@ public static class TextureProcessor
 		return fileName;
 	}
 
-	/// <summary>
-	/// Bake per-channel tint colors into the albedo (in place). For each zone, the albedo is
-	/// multiplied toward (albedo * tint) by that mask channel: lerp(alb, alb*tint, mask.channel).
-	/// Mirrors Unreal's multi-tint workflow so the imported model matches its source look.
-	/// Tint colors are LINEAR (Unreal LinearColor); the multiply is done in linear space.
-	/// </summary>
-	static void BakeTintZones( Bitmap alb, Bitmap mask, Dictionary<string, float[]> zones, Dictionary<string, float> scalars )
+	/// <summary>Index (0=R,1=G,2=B) of the channel carrying the mask data (widest value range).</summary>
+	static int DominantChannel( Bitmap src )
 	{
-		var px = alb.GetPixels();
-		int w = alb.Width, h = alb.Height;
+		var px = src.GetPixels();
+		float minR = 1, maxR = 0, minG = 1, maxG = 0, minB = 1, maxB = 0;
 
-		Color[] mpx = null;
-		int mw = 0, mh = 0;
-		if ( mask is not null )
+		// Sample sparsely - masks are large and uniform enough that this is plenty.
+		int step = Math.Max( 1, px.Length / 100000 );
+		for ( int i = 0; i < px.Length; i += step )
 		{
-			mpx = mask.GetPixels();
-			mw = mask.Width;
-			mh = mask.Height;
+			var c = px[i];
+			if ( c.r < minR ) minR = c.r; if ( c.r > maxR ) maxR = c.r;
+			if ( c.g < minG ) minG = c.g; if ( c.g > maxG ) maxG = c.g;
+			if ( c.b < minB ) minB = c.b; if ( c.b > maxB ) maxB = c.b;
 		}
 
-		// Unreal's "Tint Mask Multi" scales the mask strength; default 1.
-		float multi = 1f;
-		if ( scalars is not null && scalars.TryGetValue( "Tint Mask Multi", out var mv ) && mv > 0f )
-			multi = mv;
-
-		var zoneList = new List<(int ch, float r, float g, float b)>();
-		foreach ( var (key, c) in zones )
-		{
-			int ch = key switch { "r" => 0, "g" => 1, "b" => 2, "a" => 3, _ => -1 };
-			if ( ch < 0 || c is null || c.Length < 3 )
-				continue;
-
-			zoneList.Add( (ch, c[0], c[1], c[2]) );
-		}
-
-		for ( int y = 0; y < h; y++ )
-		{
-			for ( int x = 0; x < w; x++ )
-			{
-				int i = y * w + x;
-				var c = px[i];
-				float lr = SrgbToLinear( c.r ), lg = SrgbToLinear( c.g ), lb = SrgbToLinear( c.b );
-
-				Color m = default;
-				if ( mpx is not null )
-				{
-					int mx = mw == w ? x : x * mw / w;
-					int my = mh == h ? y : y * mh / h;
-					m = mpx[my * mw + mx];
-				}
-
-				foreach ( var z in zoneList )
-				{
-					float maskV = mpx is null ? 1f : (z.ch == 0 ? m.r : z.ch == 1 ? m.g : z.ch == 2 ? m.b : m.a);
-					maskV = Math.Clamp( maskV * multi, 0f, 1f );
-					lr = Lerp( lr, lr * z.r, maskV );
-					lg = Lerp( lg, lg * z.g, maskV );
-					lb = Lerp( lb, lb * z.b, maskV );
-				}
-
-				px[i] = new Color( LinearToSrgb( lr ), LinearToSrgb( lg ), LinearToSrgb( lb ), c.a );
-			}
-		}
-
-		alb.SetPixels( px );
-	}
-
-	static float Lerp( float a, float b, float t ) => a + (b - a) * t;
-
-	static float SrgbToLinear( float c )
-		=> c <= 0.04045f ? c / 12.92f : MathF.Pow( (c + 0.055f) / 1.055f, 2.4f );
-
-	static float LinearToSrgb( float c )
-	{
-		c = Math.Clamp( c, 0f, 1f );
-		return c <= 0.0031308f ? c * 12.92f : 1.055f * MathF.Pow( c, 1f / 2.4f ) - 0.055f;
+		float rangeR = maxR - minR, rangeG = maxG - minG, rangeB = maxB - minB;
+		if ( rangeB >= rangeR && rangeB >= rangeG ) return 2;
+		if ( rangeG >= rangeR && rangeG >= rangeB ) return 1;
+		return 0;
 	}
 
 	/// <summary>New grayscale bitmap from one channel (0=R, 1=G, 2=B).</summary>

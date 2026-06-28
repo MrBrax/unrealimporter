@@ -39,10 +39,12 @@ public static class Kv3Writer
 	/// or null to omit that slot.
 	/// </summary>
 	public static string VmatText( string color, string normal, string roughness, string metallic, string ao, string alpha = null,
-		string tintMask = null, float[] tintColor = null, float? tintAmount = null )
+		string tintMask = null, float[] tintColor = null, float? tintAmount = null, string tintComment = null )
 	{
 		var sb = new StringBuilder();
 		sb.AppendLine( "// THIS FILE IS AUTO-GENERATED (unreal_importer)" );
+		if ( !string.IsNullOrEmpty( tintComment ) )
+			sb.AppendLine( $"// {tintComment}" );
 		sb.AppendLine();
 		sb.AppendLine( "Layer0" );
 		sb.AppendLine( "{" );
