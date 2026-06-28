@@ -49,8 +49,11 @@ public class ManifestMaterial
 	/// <summary>Grayscale tint mask (white = full tint). Packed into the normal's alpha by the complex shader.</summary>
 	[JsonPropertyName( "tintmask" )] public string TintMask { get; set; }
 
-	/// <summary>Best-guess tint color [r,g,b,a] in Unreal LINEAR space (sRGB-encode for g_vColorTint).</summary>
+	/// <summary>Best-guess single tint color [r,g,b,a] in Unreal LINEAR space (sRGB-encode for g_vColorTint).</summary>
 	[JsonPropertyName( "tint_color" )] public float[] TintColor { get; set; }
+
+	/// <summary>Multi-zone tint: mask channel ("r"/"g"/"b"/"a") -> LINEAR tint [r,g,b,a]. Baked into the albedo.</summary>
+	[JsonPropertyName( "tint_zones" )] public Dictionary<string, float[]> TintZones { get; set; }
 
 	/// <summary>Best-guess tint amount/strength (0..1) -> g_flModelTintAmount.</summary>
 	[JsonPropertyName( "tint_amount" )] public float? TintAmount { get; set; }

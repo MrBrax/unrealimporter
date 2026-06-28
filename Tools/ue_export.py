@@ -238,16 +238,39 @@ def vectors_from_instance(mi):
     return out
 
 
+def tint_channel(name):
+    """Mask channel ('r'/'g'/'b'/'a') a per-channel tint param drives, e.g. 'Base Color Tint (Red)'."""
+    n = name.lower()
+    if "(red)" in n or "_red" in n or n.endswith(" red"):
+        return "r"
+    if "(green)" in n or "_green" in n or n.endswith(" green"):
+        return "g"
+    if "(blue)" in n or "_blue" in n or n.endswith(" blue"):
+        return "b"
+    if "(alpha)" in n or n.endswith(" alpha"):
+        return "a"
+    return None
+
+
+def pick_tint_zones(vectors):
+    """{channel: [r,g,b,a]} for multi-zone tint masks (each tint color keyed to a mask channel)."""
+    zones = {}
+    for name, val in vectors.items():
+        if "tint" not in name.lower():
+            continue
+        ch = tint_channel(name)
+        if ch and ch not in zones:
+            zones[ch] = val
+    return zones
+
+
 def pick_tint_color(vectors):
-    """Best-guess tint color from vector params: prefer a 'tint' param, else a 'color' one."""
-    fallback = None
+    """Single (non-channel) tint color: a 'tint' vector param that isn't emissive/specular/per-channel."""
     for name, val in vectors.items():
         n = name.lower()
-        if "tint" in n:
+        if "tint" in n and "emiss" not in n and "spec" not in n and tint_channel(name) is None:
             return val
-        if fallback is None and "color" in n and "mask" not in n:
-            fallback = val
-    return fallback
+    return None
 
 
 def pick_tint_amount(scalars):
@@ -303,10 +326,17 @@ def texture_bindings_for_mesh(mesh, out_dir, exported_textures):
             entry["scalar_params"] = scalars
         if vectors:
             entry["vector_params"] = vectors
-        tint_color = pick_tint_color(vectors)
-        if tint_color is not None:
-            entry["tint_color"] = tint_color
-            log("    tint_color={}".format(tint_color))
+        # Multi-zone tint mask (per-channel tint colors) must be baked into the albedo - s&box's
+        # complex shader only has a single tint. A single uniform tint can stay dynamic.
+        tint_zones = pick_tint_zones(vectors)
+        if tint_zones:
+            entry["tint_zones"] = tint_zones
+            log("    tint_zones={}".format(tint_zones))
+        else:
+            tint_color = pick_tint_color(vectors)
+            if tint_color is not None:
+                entry["tint_color"] = tint_color
+                log("    tint_color={}".format(tint_color))
         tint_amount = pick_tint_amount(scalars)
         if tint_amount is not None:
             entry["tint_amount"] = tint_amount

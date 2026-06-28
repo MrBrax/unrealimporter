@@ -90,9 +90,10 @@ public static class AssetImporter
 						metallic: TexContent( assetsDir, texturesDir, tex.Metallic ),
 						ao: TexContent( assetsDir, texturesDir, tex.Ao ),
 						alpha: TexContent( assetsDir, texturesDir, tex.Alpha ),
-						tintMask: TexContent( assetsDir, texturesDir, tex.TintMask ),
-						tintColor: mat.TintColor,
-						tintAmount: mat.TintAmount );
+						// Multi-zone tints are baked into Color; don't re-tint in the shader.
+						tintMask: tex.TintBaked ? null : TexContent( assetsDir, texturesDir, tex.TintMask ),
+						tintColor: tex.TintBaked ? null : mat.TintColor,
+						tintAmount: tex.TintBaked ? null : mat.TintAmount );
 
 					var vmatPath = Path.Combine( materialsDir, baseName + ".vmat" );
 					await File.WriteAllTextAsync( vmatPath, vmatText, progressToken );
