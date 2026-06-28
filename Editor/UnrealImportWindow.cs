@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Sandbox;
 
 namespace Editor.UnrealImporter;
@@ -108,7 +109,7 @@ public class UnrealImportWindow : Widget
 			var row = Layout.Row();
 			row.Margin = new Sandbox.UI.Margin( 0, 8, 0, 0 );
 			row.AddStretchCell();
-			exportButton = new Button.Primary( "Export to s&box", "move_to_inbox", this ) { Clicked = DoExport };
+			exportButton = new Button.Primary( "Export to s&box", "move_to_inbox", this ) { Clicked = () => _ = DoExport() };
 			exportButton.Enabled = false;
 			row.Add( exportButton );
 			Layout.Add( row );
@@ -249,8 +250,10 @@ public class UnrealImportWindow : Widget
 		if ( exportButton is not null )
 			exportButton.Enabled = entries.Count > 0 && !string.IsNullOrEmpty( outputFolder ) && !string.IsNullOrEmpty( uprojectPath );
 	}
+	
+	
 
-	void DoExport()
+	async Task DoExport()
 	{
 		var selected = entries.Where( e => e.Check is not null && e.Check.Value ).Select( e => e.GamePath ).ToList();
 		if ( selected.Count == 0 )
@@ -275,32 +278,40 @@ public class UnrealImportWindow : Widget
 			return;
 		}
 
+		await Task.Delay( 100 );
+
 		statusLabel.Text = $"Exporting {selected.Count} mesh(es) via headless Unreal... this can take a minute.";
+		
+		using var progress = Application.Editor.ProgressSection();
+
+		progress.Title = "Exporting meshes via headless Unreal";
+		progress.TotalCount = selected.Count;
+		var progressToken = progress.GetCancel();
 
 		try
 		{
-			var export = HeadlessExporter.Run( editorCmd, uprojectPath, selected, script );
+			var export = await HeadlessExporter.Run( editorCmd, uprojectPath, selected, script, progressToken );
 			if ( !export.Success )
 			{
-				EditorUtility.DisplayDialog( "Export failed", export.Error ?? "Unknown error." );
+				EditorUtility.DisplayDialog( "Export failed", export.Error ?? "Unknown error.", icon: "⚠️" );
 				statusLabel.Text = "Export failed.";
 				return;
 			}
 
 			var manifest = ImportManifest.Load( export.ManifestPath );
-			var summary = AssetImporter.Import( manifest, export.StagingDir, outputFolder, flatCheckbox is not null && flatCheckbox.Value );
+			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n\n" +
 				$"Output:\n{summary.OutputDir}";
 			if ( summary.Warnings.Count > 0 )
 				msg += "\n\nWarnings:\n - " + string.Join( "\n - ", summary.Warnings.Take( 10 ) );
 
-			EditorUtility.DisplayDialog( "Import complete", msg );
+			EditorUtility.DisplayDialog( "Import complete", msg, icon: "✅" );
 			statusLabel.Text = $"Done: {summary.Models} models, {summary.Materials} materials, {summary.Textures} textures.";
 		}
 		catch ( Exception e )
 		{
-			EditorUtility.DisplayDialog( "Import error", e.ToString() );
+			EditorUtility.DisplayDialog( "Import error", e.ToString(), icon: "⚠️" );
 			statusLabel.Text = "Import error.";
 		}
 	}

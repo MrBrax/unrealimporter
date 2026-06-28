@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Editor.UnrealImporter;
 
@@ -50,7 +52,7 @@ public static class HeadlessExporter
 		return "/Game/" + rel;
 	}
 
-	public static ExportResult Run( string editorCmd, string uprojectPath, IEnumerable<string> gameAssetPaths, string scriptPath )
+	public static async Task<ExportResult> Run( string editorCmd, string uprojectPath, IEnumerable<string> gameAssetPaths, string scriptPath, CancellationToken progressToken )
 	{
 		var result = new ExportResult();
 
@@ -60,7 +62,7 @@ public static class HeadlessExporter
 
 		// Pass the selection via a file (env-var/command-line length is limited).
 		var assetsFile = Path.Combine( stagingDir, "_assets.txt" );
-		File.WriteAllLines( assetsFile, gameAssetPaths );
+		await File.WriteAllLinesAsync( assetsFile, gameAssetPaths, progressToken );
 
 		var logPath = Path.Combine( stagingDir, "ue_export.log" );
 
@@ -83,7 +85,7 @@ public static class HeadlessExporter
 		try
 		{
 			using var proc = Process.Start( psi );
-			proc.WaitForExit();
+			await proc.WaitForExitAsync( progressToken );
 
 			result.ManifestPath = Path.Combine( stagingDir, "manifest.json" );
 			if ( proc.ExitCode != 0 )

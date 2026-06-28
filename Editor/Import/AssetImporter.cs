@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Sandbox;
 
 namespace Editor.UnrealImporter;
@@ -21,8 +23,12 @@ public class ImportSummary
 /// </summary>
 public static class AssetImporter
 {
+	/// <param name="manifest"></param>
+	/// <param name="stagingDir"></param>
+	/// <param name="outputRoot"></param>
 	/// <param name="flat">When true, everything goes directly in outputRoot instead of models/materials/textures subfolders.</param>
-	public static ImportSummary Import( ImportManifest manifest, string stagingDir, string outputRoot, bool flat = false )
+	/// <param name="progressToken"></param>
+	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false )
 	{
 		var summary = new ImportSummary { OutputDir = outputRoot };
 
@@ -86,7 +92,7 @@ public static class AssetImporter
 						alpha: TexContent( assetsDir, texturesDir, tex.Alpha ) );
 
 					var vmatPath = Path.Combine( materialsDir, baseName + ".vmat" );
-					File.WriteAllText( vmatPath, vmatText );
+					await File.WriteAllTextAsync( vmatPath, vmatText, progressToken );
 					summary.Materials++;
 
 					vmatContent = ToContentPath( assetsDir, vmatPath );
@@ -99,7 +105,7 @@ public static class AssetImporter
 			// Write the model.
 			var fbxContent = ToContentPath( assetsDir, fbxDst );
 			var vmdlText = Kv3Writer.VmdlText( fbxContent, asset.ImportScale <= 0 ? 0.3937f : asset.ImportScale, remaps );
-			File.WriteAllText( Path.Combine( modelsDir, modelName + ".vmdl" ), vmdlText );
+			await File.WriteAllTextAsync( Path.Combine( modelsDir, modelName + ".vmdl" ), vmdlText, progressToken );
 			summary.Models++;
 		}
 
