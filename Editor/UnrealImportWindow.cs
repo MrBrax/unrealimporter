@@ -22,18 +22,22 @@ public class UnrealImportWindow : Widget
 	{
 		public string GamePath;     // /Game/.../SM_X
 		public string AbsPath;      // ...\Content\...\SM_X.uasset
-		public Checkbox Check;
+		public string Display;      // GamePath without the /Game/ prefix
+		public long SizeBytes;      // .uasset on disk (uncooked, so this is the whole asset)
+		public bool Selected = true;
 	}
 
 	string uprojectPath;
 	string uprojectFolder;
 	string outputFolder;
+	string searchFilter = "";
 
 	readonly List<MeshEntry> entries = new();
 
 	Label projectLabel;
 	Label outputLabel;
 	Label statusLabel;
+	LineEdit searchEdit;
 	ScrollArea listScroll;
 	Button exportButton;
 	Checkbox flatCheckbox;
@@ -69,6 +73,18 @@ public class UnrealImportWindow : Widget
 			var browse = new Button( "Browse Project...", "folder_open", this ) { Clicked = PickProject };
 			row.Add( browse );
 			Layout.Add( row );
+		}
+
+		// Search row
+		{
+			searchEdit = new LineEdit( this ) { PlaceholderText = "⌕  Search meshes", ToolTip = "Filter the list by name or path" };
+			searchEdit.TextEdited += t =>
+			{
+				searchFilter = t ?? "";
+				RebuildList();
+				UpdateStatus();
+			};
+			Layout.Add( searchEdit );
 		}
 
 		// Select all/none row
@@ -183,20 +199,26 @@ public class UnrealImportWindow : Widget
 		var content = Path.Combine( uprojectFolder, "Content" );
 		if ( Directory.Exists( content ) )
 		{
-			foreach ( var file in Directory.EnumerateFiles( content, "*.uasset", SearchOption.AllDirectories ) )
+			// FileInfo rather than plain paths so we get the size without a second stat per file.
+			foreach ( var file in new DirectoryInfo( content ).EnumerateFiles( "*.uasset", SearchOption.AllDirectories ) )
 			{
 				// Heuristic: meshes live in a "Meshes" folder and/or are named SM_*.
-				var dir = Path.GetDirectoryName( file ) ?? "";
-				var name = Path.GetFileNameWithoutExtension( file );
+				var dir = file.DirectoryName ?? "";
+				var name = Path.GetFileNameWithoutExtension( file.Name );
 				bool looksLikeMesh = dir.Replace( '\\', '/' ).Contains( "/Meshes", StringComparison.OrdinalIgnoreCase )
 					|| name.StartsWith( "SM_", StringComparison.OrdinalIgnoreCase );
 				if ( !looksLikeMesh )
 					continue;
 
+				var gamePath = HeadlessExporter.ToGamePath( uprojectFolder, file.FullName );
+
 				entries.Add( new MeshEntry
 				{
-					AbsPath = file,
-					GamePath = HeadlessExporter.ToGamePath( uprojectFolder, file ),
+					AbsPath = file.FullName,
+					GamePath = gamePath,
+					// Show the path relative to /Game for readability.
+					Display = gamePath.StartsWith( "/Game/" ) ? gamePath["/Game/".Length..] : gamePath,
+					SizeBytes = file.Length,
 				} );
 			}
 		}
@@ -209,7 +231,25 @@ public class UnrealImportWindow : Widget
 		entries.Sort( ( a, b ) => string.CompareOrdinal( a.GamePath, b.GamePath ) );
 		RebuildList();
 		UpdateExportEnabled();
-		statusLabel.Text = $"{entries.Count} static mesh(es) found.";
+		UpdateStatus();
+	}
+
+	/// <summary>Entries matching the current search box, in list order.</summary>
+	IEnumerable<MeshEntry> Filtered()
+	{
+		if ( string.IsNullOrWhiteSpace( searchFilter ) )
+			return entries;
+
+		var term = searchFilter.Trim();
+		return entries.Where( e => e.Display.Contains( term, StringComparison.OrdinalIgnoreCase ) );
+	}
+
+	static string FormatSize( long bytes )
+	{
+		if ( bytes >= 1024L * 1024 * 1024 ) return $"{bytes / (1024f * 1024 * 1024):0.##} GB";
+		if ( bytes >= 1024 * 1024 ) return $"{bytes / (1024f * 1024):0.#} MB";
+		if ( bytes >= 1024 ) return $"{bytes / 1024f:0} KB";
+		return $"{bytes} B";
 	}
 
 	void RebuildList()
@@ -219,18 +259,41 @@ public class UnrealImportWindow : Widget
 		canvas.Layout.Margin = 4;
 		canvas.Layout.Spacing = 2;
 
+		var visible = Filtered().ToList();
+
 		if ( entries.Count == 0 )
 		{
 			canvas.Layout.Add( new Label( "Pick a project to list its meshes.", canvas ) );
 		}
+		else if ( visible.Count == 0 )
+		{
+			canvas.Layout.Add( new Label( $"No meshes match \"{searchFilter.Trim()}\".", canvas ) );
+		}
 		else
 		{
-			foreach ( var e in entries )
+			foreach ( var e in visible )
 			{
-				// Show the path relative to /Game for readability.
-				var display = e.GamePath.StartsWith( "/Game/" ) ? e.GamePath["/Game/".Length..] : e.GamePath;
-				e.Check = new Checkbox( display, canvas ) { Value = true };
-				canvas.Layout.Add( e.Check );
+				// Selection lives on the entry, not the checkbox - the list is rebuilt on every
+				// keystroke, so ticks would otherwise be lost as soon as an entry is filtered out.
+				var entry = e;
+
+				var row = new Widget( canvas );
+				row.Layout = Layout.Row();
+				row.Layout.Spacing = 8;
+
+				var check = new Checkbox( entry.Display, row ) { Value = entry.Selected };
+				check.Toggled = () =>
+				{
+					entry.Selected = check.Value;
+					UpdateStatus();
+				};
+				row.Layout.Add( check, 1 );
+
+				var size = new Label( FormatSize( entry.SizeBytes ), row ) { WordWrap = false };
+				size.Color = Theme.TextControl.WithAlpha( 0.5f );
+				row.Layout.Add( size );
+
+				canvas.Layout.Add( row );
 			}
 		}
 
@@ -238,11 +301,39 @@ public class UnrealImportWindow : Widget
 		listScroll.Canvas = canvas;
 	}
 
+	/// <summary>Ticks or unticks everything currently shown - the search filter narrows this.</summary>
 	void SetAll( bool on )
 	{
-		foreach ( var e in entries )
-			if ( e.Check is not null )
-				e.Check.Value = on;
+		foreach ( var e in Filtered() )
+			e.Selected = on;
+
+		RebuildList();
+		UpdateStatus();
+	}
+
+	void UpdateStatus()
+	{
+		if ( statusLabel is null )
+			return;
+
+		if ( entries.Count == 0 )
+		{
+			statusLabel.Text = "";
+			return;
+		}
+
+		var selected = entries.Where( e => e.Selected ).ToList();
+		var shown = Filtered().Count();
+
+		var text = shown == entries.Count
+			? $"{entries.Count} static mesh(es) found."
+			: $"{shown} of {entries.Count} static mesh(es) shown.";
+
+		text += selected.Count > 0
+			? $"  {selected.Count} selected ({FormatSize( selected.Sum( e => e.SizeBytes ) )})."
+			: "  Nothing selected.";
+
+		statusLabel.Text = text;
 	}
 
 	void UpdateExportEnabled()
@@ -255,7 +346,9 @@ public class UnrealImportWindow : Widget
 
 	async Task DoExport()
 	{
-		var selected = entries.Where( e => e.Check is not null && e.Check.Value ).Select( e => e.GamePath ).ToList();
+		// Deliberately ignores the search filter - ticks persist across filtering, so everything
+		// the user has selected gets exported whether or not it's on screen right now.
+		var selected = entries.Where( e => e.Selected ).Select( e => e.GamePath ).ToList();
 		if ( selected.Count == 0 )
 		{
 			EditorUtility.DisplayDialog( "Nothing selected", "Tick at least one mesh to export." );
