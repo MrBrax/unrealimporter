@@ -1,0 +1,18 @@
+# Auto-generated code editor files
+.vs/*
+.vscode/*
+*.csproj
+obj
+bin
+Properties/*
+*launchSettings.json
+*.sln
+*.slnx
+*idea
+
+# Auto-generated asset related files
+.sbox/*
+*.generated.*
+*.*_c
+
+*.pyc
