@@ -13,7 +13,6 @@ namespace Editor.UnrealImporter;
 ///
 /// TODO: max texture resolution selection
 /// TODO: make async with progress bar
-/// TODO: thumbnails
 /// </summary>
 [EditorApp( "Unreal Importer", "move_to_inbox", "Import Unreal / Fab static meshes into s&box" )]
 public class UnrealImportWindow : Widget
@@ -25,6 +24,60 @@ public class UnrealImportWindow : Widget
 		public string Display;      // GamePath without the /Game/ prefix
 		public long SizeBytes;      // .uasset on disk (uncooked, so this is the whole asset)
 		public bool Selected = true;
+	}
+
+	/// <summary>
+	/// The thumbnail Unreal embedded in the .uasset, loaded lazily off the main thread.
+	/// Shows a placeholder icon until resolved; assets without a thumbnail keep it.
+	/// </summary>
+	class ThumbnailWidget : Widget
+	{
+		const int ThumbSize = 40;
+
+		Pixmap pixmap;
+		bool resolved;
+
+		public ThumbnailWidget( string absPath, Widget parent ) : base( parent )
+		{
+			FixedSize = ThumbSize;
+
+			if ( UassetThumbnail.TryGetCached( absPath, out pixmap ) )
+			{
+				resolved = true;
+				return;
+			}
+
+			_ = Resolve( absPath );
+		}
+
+		async Task Resolve( string absPath )
+		{
+			var pm = await UassetThumbnail.LoadAsync( absPath );
+
+			// The list rebuilds on every keystroke, so this row may be gone by now.
+			if ( !IsValid )
+				return;
+
+			pixmap = pm;
+			resolved = true;
+			Update();
+		}
+
+		protected override void OnPaint()
+		{
+			Paint.ClearPen();
+			Paint.SetBrush( Theme.ControlBackground );
+			Paint.DrawRect( LocalRect, 3 );
+
+			if ( pixmap is not null )
+			{
+				Paint.Draw( LocalRect, pixmap, 1, 3 );
+				return;
+			}
+
+			Paint.SetPen( Theme.TextControl.WithAlpha( resolved ? 0.25f : 0.1f ) );
+			Paint.DrawIcon( LocalRect, "view_in_ar", 20 );
+		}
 	}
 
 	string uprojectPath;
@@ -280,6 +333,8 @@ public class UnrealImportWindow : Widget
 				var row = new Widget( canvas );
 				row.Layout = Layout.Row();
 				row.Layout.Spacing = 8;
+
+				row.Layout.Add( new ThumbnailWidget( entry.AbsPath, row ) );
 
 				var check = new Checkbox( entry.Display, row ) { Value = entry.Selected };
 				check.Toggled = () =>
