@@ -454,6 +454,7 @@ public class UnrealImportWindow : Widget
 	string uprojectFolder;
 	string outputFolder;
 	string searchFilter = "";
+	bool flatView;
 
 	readonly List<MeshEntry> entries = new();
 	readonly List<MapEntry> mapEntries = new();
@@ -520,6 +521,21 @@ public class UnrealImportWindow : Widget
 			row.Add( new Button( "Select All", "done_all", this ) { Clicked = () => SetAll( true ) } );
 			row.Add( new Button( "Select None", "remove_done", this ) { Clicked = () => SetAll( false ) } );
 			row.AddStretchCell();
+
+			flatView = EditorCookie.Get( "unreal_import_flat_view", false );
+			var flatToggle = new Checkbox( "Flat list", this )
+			{
+				Value = flatView,
+				ToolTip = "Show every mesh as one flat list instead of the folder tree",
+			};
+			flatToggle.Toggled = () =>
+			{
+				flatView = flatToggle.Value;
+				EditorCookie.Set( "unreal_import_flat_view", flatView );
+				RefreshTree();
+			};
+			row.Add( flatToggle );
+
 			Layout.Add( row );
 		}
 
@@ -830,15 +846,17 @@ public class UnrealImportWindow : Widget
 		return mapEntries.Where( e => e.Display.Contains( term, StringComparison.OrdinalIgnoreCase ) );
 	}
 
-	/// <summary>Tree of folders normally; a flat list of matches while searching.</summary>
+	/// <summary>Tree of folders normally; a flat list while searching or when toggled flat.</summary>
 	void RefreshTree()
 	{
 		if ( tree is null )
 			return;
 
-		if ( string.IsNullOrWhiteSpace( searchFilter ) )
+		bool searching = !string.IsNullOrWhiteSpace( searchFilter );
+
+		if ( !searching && !flatView )
 		{
-			// Persistent nodes, so folder expansion survives search round-trips.
+			// Persistent nodes, so folder expansion survives search/flat round-trips.
 			tree.SetItems( rootNodes );
 
 			if ( rootNodes.Count == 1 )
@@ -846,11 +864,13 @@ public class UnrealImportWindow : Widget
 		}
 		else
 		{
+			// Filtered()/FilteredMaps() return everything when the search box is empty,
+			// so this doubles as the plain flat view.
 			var flat = new List<TreeNode>();
 			flat.AddRange( FilteredMaps().Select( m => (TreeNode)new MapNode( this, m, fullPath: true ) ) );
 			flat.AddRange( Filtered().Select( e => (TreeNode)new MeshNode( this, e, fullPath: true ) ) );
 
-			if ( flat.Count == 0 )
+			if ( flat.Count == 0 && searching )
 				flat.Add( new TreeNode( $"No matches for \"{searchFilter.Trim()}\"" ) );
 
 			tree.SetItems( flat );
