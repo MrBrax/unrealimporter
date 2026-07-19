@@ -468,6 +468,7 @@ public class UnrealImportWindow : Widget
 	ImportTreeView tree;
 	Button exportButton;
 	Checkbox flatCheckbox;
+	Checkbox lodCheckbox;
 
 	public UnrealImportWindow() : this( null ) { }
 
@@ -557,6 +558,13 @@ public class UnrealImportWindow : Widget
 
 		flatCheckbox = new Checkbox( "Flat output (no models/materials/textures subfolders)", this ) { Value = false };
 		Layout.Add( flatCheckbox );
+
+		lodCheckbox = new Checkbox( "Generate LODs (5-level auto chain; untick for full detail at every distance)", this )
+		{
+			Value = EditorCookie.Get( "unreal_import_lods", true ),
+		};
+		lodCheckbox.Toggled = () => EditorCookie.Set( "unreal_import_lods", lodCheckbox.Value );
+		Layout.Add( lodCheckbox );
 
 		statusLabel = new Label( "", this );
 		statusLabel.Color = Theme.TextControl.WithAlpha( 0.6f );
@@ -1023,6 +1031,7 @@ public class UnrealImportWindow : Widget
 			progress.Title = $"Importing map {map.Display}";
 			var manifest = ImportManifest.Load( export.ManifestPath );
 			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
+				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n" +
@@ -1078,6 +1087,7 @@ public class UnrealImportWindow : Widget
 			progress.Title = "Importing into s&box";
 			var manifest = ImportManifest.Load( export.ManifestPath );
 			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
+				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n\n" +

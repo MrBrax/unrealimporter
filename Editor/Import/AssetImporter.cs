@@ -34,7 +34,8 @@ public static class AssetImporter
 	/// <param name="flat">When true, everything goes directly in outputRoot instead of models/materials/textures subfolders.</param>
 	/// <param name="progressToken"></param>
 	/// <param name="onProgress">(done, total, current asset name) per imported model.</param>
-	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false, Action<int, int, string> onProgress = null )
+	/// <param name="generateLods">When false, models get no auto-LOD chain (full detail always).</param>
+	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false, Action<int, int, string> onProgress = null, bool generateLods = true )
 	{
 		var summary = new ImportSummary { OutputDir = outputRoot };
 
@@ -140,6 +141,12 @@ public static class AssetImporter
 				remaps.Add( (remapKey, vmatContent) );
 			}
 
+			// UE's FBX exporter names material nodes after the assigned material - when two
+			// slots share one material, the FBX SDK uniquifies the duplicates with numeric
+			// suffixes (MI_Escalator_01a + MI_Escalator_01a_3). Those suffixed nodes need
+			// remaps too, or the engine hunts for a literal "mi_escalator_01a_3.vmat".
+			remaps.AddRange( SuffixedRemaps( fbxDst, remaps ) );
+
 			// Write the model, then verify it compiles. Hull-from-render chokes on some
 			// geometry (dense foliage cards -> "Inconsistent hull geometry"), so fall back
 			// to a single hull, then to no collision, until the model compiles.
@@ -150,7 +157,7 @@ public static class AssetImporter
 
 			foreach ( var hullMode in new[] { "HullPerElement", "SingleHull", null } )
 			{
-				await File.WriteAllTextAsync( vmdlPath, Kv3Writer.VmdlText( fbxContent, scale, remaps, hullMode ), progressToken );
+				await File.WriteAllTextAsync( vmdlPath, Kv3Writer.VmdlText( fbxContent, scale, remaps, hullMode, lods: generateLods ), progressToken );
 
 				var vmdlAsset = global::Editor.AssetSystem.RegisterFile( vmdlPath );
 				if ( vmdlAsset is null )
@@ -181,7 +188,7 @@ public static class AssetImporter
 			if ( asset.GamePath is not null && needsMirror.Contains( asset.GamePath ) )
 			{
 				var mirrorPath = Path.Combine( modelsDir, modelName + "_mirror.vmdl" );
-				await File.WriteAllTextAsync( mirrorPath, Kv3Writer.VmdlText( fbxContent, scale, remaps, usedHullMode ?? "HullPerElement", mirror: true ), progressToken );
+				await File.WriteAllTextAsync( mirrorPath, Kv3Writer.VmdlText( fbxContent, scale, remaps, usedHullMode ?? "HullPerElement", mirror: true, lods: generateLods ), progressToken );
 
 				var mirrorAsset = global::Editor.AssetSystem.RegisterFile( mirrorPath );
 				if ( mirrorAsset is not null && (!mirrorAsset.Compile( full: false ) || mirrorAsset.IsCompileFailed) )
@@ -205,6 +212,43 @@ public static class AssetImporter
 		}
 
 		return summary;
+	}
+
+	/// <summary>
+	/// Scan the FBX for numeric-suffixed variants of known material node names
+	/// (duplicate-material slots uniquified by the FBX SDK) and remap them to the same
+	/// vmat as their base name. False positives from unrelated strings just produce
+	/// unused remap entries, which are harmless.
+	/// </summary>
+	static List<(string slot, string vmat)> SuffixedRemaps( string fbxPath, IReadOnlyList<(string slot, string vmat)> remaps )
+	{
+		var extra = new List<(string, string)>();
+
+		string text;
+		try
+		{
+			text = Encoding.ASCII.GetString( File.ReadAllBytes( fbxPath ) );
+		}
+		catch
+		{
+			return extra;
+		}
+
+		var known = remaps.Select( r => r.slot ).ToHashSet( StringComparer.OrdinalIgnoreCase );
+
+		foreach ( var (slot, vmat) in remaps.ToList() )
+		{
+			if ( string.IsNullOrEmpty( slot ) )
+				continue;
+
+			foreach ( System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches( text, System.Text.RegularExpressions.Regex.Escape( slot ) + @"_\d+" ) )
+			{
+				if ( known.Add( m.Value ) )
+					extra.Add( (m.Value, vmat) );
+			}
+		}
+
+		return extra;
 	}
 
 	/// <summary>

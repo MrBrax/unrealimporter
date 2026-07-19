@@ -182,8 +182,9 @@ public static class Kv3Writer
 	/// mirror emits a ModelModifier_ScaleAndMirror flipping local X - unlike a negative
 	/// import_scale (which mirrors but leaves the triangle winding inverted, so faces
 	/// get culled from the wrong side), the modifier corrects winding properly.
+	/// lods=false skips the auto-LOD chain entirely (full detail at every distance).
 	/// </summary>
-	public static string VmdlText( string fbxContentPath, float importScale, IReadOnlyList<(string slot, string vmat)> remaps, string hullMode = "HullPerElement", bool mirror = false )
+	public static string VmdlText( string fbxContentPath, float importScale, IReadOnlyList<(string slot, string vmat)> remaps, string hullMode = "HullPerElement", bool mirror = false, bool lods = true )
 	{
 		var sb = new StringBuilder();
 		sb.AppendLine( "<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:modeldoc30:version{8c2d7a91-9c42-4bf0-883a-5a3b1762d4f1} -->" );
@@ -282,7 +283,8 @@ public static class Kv3Writer
 		sb.AppendLine( "\t\t\t}," );
 
 		// --- Auto LODs ---
-		AppendLodGroupList( sb );
+		if ( lods )
+			AppendLodGroupList( sb );
 
 		sb.AppendLine( "\t\t]" );
 		sb.AppendLine( "\t\tmodel_archetype = \"\"" );
