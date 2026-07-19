@@ -227,13 +227,16 @@ public static class Kv3Writer
 	static void AppendLodGroupList( StringBuilder sb )
 	{
 		// (switch_threshold, simplify_mode, reduction, lock_border, permissive, protect_uv, meshes-on-lod0)
+		// Reductions compound down the chain; keep the cumulative ratio (~0.17) gentle enough
+		// that low-poly meshes never simplify to 0 triangles - a LOD with no geometry fails
+		// the whole model compile (seen with 12-triangle drywall sheets at cumulative 0.04).
 		var lods = new (float thr, int mode, float red, bool lockBorder, bool permissive, bool protectUv, bool hasMesh)[]
 		{
 			( 0.0f, 0, 0.5f, true, false, true, true ),
 			( 25.0f, 1, 0.5f, true, false, true, false ),
-			( 40.0f, 1, 0.5f, false, true, true, false ),
-			( 60.0f, 1, 0.45f, false, true, false, false ),
-			( 80.0f, 1, 0.4f, false, true, false, false ),
+			( 40.0f, 1, 0.6f, false, true, true, false ),
+			( 60.0f, 1, 0.7f, false, true, false, false ),
+			( 80.0f, 1, 0.8f, false, true, false, false ),
 		};
 
 		sb.AppendLine( "\t\t\t{" );

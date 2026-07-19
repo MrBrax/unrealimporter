@@ -52,7 +52,8 @@ public static class HeadlessExporter
 		return "/Game/" + rel;
 	}
 
-	public static async Task<ExportResult> Run( string editorCmd, string uprojectPath, IEnumerable<string> gameAssetPaths, string scriptPath, CancellationToken progressToken )
+	/// <param name="mapGamePath">When set, scene mode: export this .umap's placements plus every mesh it uses (gameAssetPaths is ignored by the script).</param>
+	public static async Task<ExportResult> Run( string editorCmd, string uprojectPath, IEnumerable<string> gameAssetPaths, string scriptPath, CancellationToken progressToken, string mapGamePath = null )
 	{
 		var result = new ExportResult();
 
@@ -67,10 +68,12 @@ public static class HeadlessExporter
 		var logPath = Path.Combine( stagingDir, "ue_export.log" );
 
 		// NOTE: -script must use forward slashes; a backslash before u/r/etc. is eaten as a python escape.
+		// PCG ships with the engine since 5.2 - without it, PCG-scattered actors in World Partition
+		// maps fail to deserialize ("Invalid actor native class") and their geometry is lost.
 		var script = scriptPath.Replace( '\\', '/' );
 		var args =
 			$"\"{uprojectPath}\" -run=pythonscript -script=\"{script}\" " +
-			$"-EnablePlugins=PythonScriptPlugin -unattended -nosplash -nullrhi -abslog=\"{logPath}\"";
+			$"-EnablePlugins=PythonScriptPlugin,PCG -unattended -nosplash -nullrhi -abslog=\"{logPath}\"";
 
 		var psi = new ProcessStartInfo
 		{
@@ -81,6 +84,8 @@ public static class HeadlessExporter
 		};
 		psi.EnvironmentVariables["UE_EXPORT_OUT"] = stagingDir;
 		psi.EnvironmentVariables["UE_EXPORT_ASSETS_FILE"] = assetsFile;
+		if ( !string.IsNullOrEmpty( mapGamePath ) )
+			psi.EnvironmentVariables["UE_EXPORT_MAP"] = mapGamePath;
 
 		try
 		{

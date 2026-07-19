@@ -15,6 +15,10 @@ public class ImportSummary
 	public int Textures;
 	public string OutputDir;
 	public List<string> Warnings = new();
+
+	/// <summary>Scene mode: placements in the generated prefab, and where it was written.</summary>
+	public int Placements;
+	public string PrefabPath;
 }
 
 /// <summary>
@@ -45,6 +49,7 @@ public static class AssetImporter
 
 		// Track shared materials/textures so we only process them once.
 		var writtenVmats = new Dictionary<string, string>();   // base -> vmat content path
+		var modelsByGamePath = new Dictionary<string, string>();   // /Game path -> vmdl content path
 
 		foreach ( var asset in manifest.Assets )
 		{
@@ -111,8 +116,24 @@ public static class AssetImporter
 			// Write the model.
 			var fbxContent = ToContentPath( assetsDir, fbxDst );
 			var vmdlText = Kv3Writer.VmdlText( fbxContent, asset.ImportScale <= 0 ? 0.3937f : asset.ImportScale, remaps );
-			await File.WriteAllTextAsync( Path.Combine( modelsDir, modelName + ".vmdl" ), vmdlText, progressToken );
+			var vmdlPath = Path.Combine( modelsDir, modelName + ".vmdl" );
+			await File.WriteAllTextAsync( vmdlPath, vmdlText, progressToken );
 			summary.Models++;
+
+			if ( !string.IsNullOrEmpty( asset.GamePath ) )
+				modelsByGamePath[asset.GamePath] = ToContentPath( assetsDir, vmdlPath );
+			
+			Log.Info( $"[{manifest.Assets.IndexOf( asset ) + 1}/{manifest.Assets.Count}] Imported {asset.Asset} -> {vmdlPath}" );
+		}
+
+		// Scene mode: turn the level's placements + lights into a prefab next to the models.
+		if ( manifest.Scene is not null )
+		{
+			if ( manifest.Scene.Warnings is { Count: > 0 } )
+				summary.Warnings.AddRange( manifest.Scene.Warnings );
+
+			summary.PrefabPath = ScenePrefabBuilder.Build( manifest.Scene, modelsByGamePath, outputRoot, summary.Warnings );
+			summary.Placements = manifest.Scene.Placements?.Count ?? 0;
 		}
 
 		return summary;

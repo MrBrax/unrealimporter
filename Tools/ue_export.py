@@ -15,9 +15,24 @@ NOTHING here is s&box specific - it only produces raw FBX + PNG + JSON.
 RMA splitting, normal green-flip, renaming and vmdl/vmat generation all happen
 later in the s&box editor tool (using Bitmap/Pixmap).
 
+Scene mode (UE_EXPORT_MAP set): loads the given .umap in the headless editor,
+records every StaticMeshComponent placement (plain, instanced and blueprint-owned)
+plus point/spot/directional lights, then exports the unique meshes it referenced
+through the normal pipeline. The manifest gains a "scene" section the s&box tool
+turns into a prefab. Loading through the editor means One-File-Per-Actor maps
+work transparently. World Partition maps get every external actor force-loaded
+via WorldPartitionBlueprintLibrary before the walk; HLOD proxies are skipped and
+huge scatter ISMs (PCG grass etc.) are dropped past UE_EXPORT_MAX_INSTANCES.
+Landscapes have no mesh to export and are reported as a warning.
+
 Configuration (env vars override the CONFIG defaults below):
   UE_EXPORT_OUT     absolute staging output dir
   UE_EXPORT_PATHS   ';'-separated /Game content paths to scan
+  UE_EXPORT_MAP     /Game path of a .umap - scene mode (overrides asset selection)
+  UE_EXPORT_MAX_INSTANCES  per-component ISM instance cap in scene mode (default 1000)
+  UE_EXPORT_MAX_MESH_PLACEMENTS  per-mesh total placement cap in scene mode (default 2000).
+                    A mesh placed more often than this is scatter (PCG grass chunks etc.) -
+                    all its placements are dropped, with a warning. 0 disables.
 
 Example command line (PowerShell):
   $env:UE_EXPORT_OUT   = "C:\\Temp\\ue_stage"
@@ -357,8 +372,255 @@ def texture_bindings_for_mesh(mesh, out_dir, exported_textures):
     return materials
 
 
+def mesh_game_path(asset):
+    """'/Game/Foo/SM_X' package path for an asset (no .ObjectName suffix)."""
+    return asset.get_path_name().split(".")[0]
+
+
+def transform_to_dict(t):
+    """unreal.Transform -> {pos (cm), rot (quat xyzw), scale} plain lists."""
+    loc, rot, s = t.translation, t.rotation, t.scale3d
+    return {
+        "pos": [loc.x, loc.y, loc.z],
+        "rot": [rot.x, rot.y, rot.z, rot.w],
+        "scale": [s.x, s.y, s.z],
+    }
+
+
+def world_transform_of(comp):
+    """World transform of a scene component, tolerating API differences."""
+    try:
+        return comp.get_world_transform()
+    except Exception:
+        # Older exposure: compose from location/rotation/scale.
+        return unreal.Transform(
+            comp.get_world_location(),
+            comp.get_world_rotation(),
+            comp.get_world_scale())
+
+
+def instance_world_transforms(comp):
+    """World transforms of an ISM/HISM component's instances (out-params vary by version)."""
+    out = []
+    for i in range(comp.get_instance_count()):
+        t = comp.get_instance_transform(i, world_space=True)
+        if isinstance(t, tuple):          # some versions return (success, transform)
+            t = t[-1]
+        if t is not None:
+            out.append(t)
+    return out
+
+
+def load_world_partition_actors():
+    """Force-load every external actor of a World Partition map. No-op for classic maps."""
+    try:
+        descs = unreal.WorldPartitionBlueprintLibrary.get_actor_descs()
+    except Exception:
+        return
+    if not descs:
+        return
+
+    guids = []
+    for d in descs:
+        try:
+            guids.append(d.get_editor_property("guid"))
+        except Exception:
+            pass
+    if not guids:
+        return
+
+    log("world partition map: force-loading {} external actors...".format(len(guids)))
+    try:
+        # Returns False when some actors can't load (PCG partitions etc.) - fine, take what we get.
+        unreal.WorldPartitionBlueprintLibrary.load_actors(guids)
+    except Exception as e:
+        warn("world partition load_actors failed: {}".format(e))
+
+
+def collect_scene(actors):
+    """Walk level actors -> (placements, lights, {game_path: mesh}, warnings)."""
+    placements, lights, meshes, warnings = [], [], {}, []
+    max_instances = int(os.environ.get("UE_EXPORT_MAX_INSTANCES", "1000"))
+    landscapes = 0
+
+    for actor in actors:
+        label = str(actor.get_actor_label())
+        cls = actor.get_class().get_name()
+
+        # HLOD proxies duplicate real geometry as baked merged meshes - never export them.
+        if cls == "WorldPartitionHLOD":
+            continue
+        if cls in ("Landscape", "LandscapeStreamingProxy"):
+            landscapes += 1
+            continue
+
+        for comp in actor.get_components_by_class(unreal.StaticMeshComponent):
+            mesh = comp.get_editor_property("static_mesh")
+            if mesh is None:
+                continue
+            try:
+                if not comp.is_visible():
+                    continue
+            except Exception:
+                pass
+
+            if isinstance(comp, unreal.InstancedStaticMeshComponent):
+                count = comp.get_instance_count()
+                if count > max_instances:
+                    warnings.append("{}: skipped {} '{}' with {} instances of {} (over UE_EXPORT_MAX_INSTANCES={})".format(
+                        label, comp.get_class().get_name(), comp.get_name(), count, mesh.get_name(), max_instances))
+                    warn("  " + warnings[-1])
+                    continue
+                transforms = instance_world_transforms(comp)
+            else:
+                transforms = [world_transform_of(comp)]
+
+            gp = mesh_game_path(mesh)
+            meshes.setdefault(gp, mesh)
+
+            for t in transforms:
+                entry = transform_to_dict(t)
+                entry["mesh"] = gp
+                entry["name"] = label
+                placements.append(entry)
+
+        for comp in actor.get_components_by_class(unreal.LightComponent):
+            if isinstance(comp, unreal.SpotLightComponent):
+                kind = "spot"
+            elif isinstance(comp, unreal.PointLightComponent):
+                kind = "point"
+            elif isinstance(comp, unreal.DirectionalLightComponent):
+                kind = "directional"
+            else:
+                continue    # sky lights, rect lights: no s&box counterpart wired up
+
+            entry = transform_to_dict(world_transform_of(comp))
+            entry["type"] = kind
+            entry["name"] = label
+            try:
+                c = comp.get_editor_property("light_color")   # 0-255 bytes
+                entry["color"] = [c.r / 255.0, c.g / 255.0, c.b / 255.0, 1.0]
+                entry["intensity"] = float(comp.get_editor_property("intensity"))
+                if kind != "directional":
+                    entry["radius"] = float(comp.get_editor_property("attenuation_radius"))
+                if kind == "spot":
+                    entry["inner_cone"] = float(comp.get_editor_property("inner_cone_angle"))
+                    entry["outer_cone"] = float(comp.get_editor_property("outer_cone_angle"))
+            except Exception as e:
+                warn("  light '{}': {}".format(label, e))
+            lights.append(entry)
+
+    if landscapes:
+        warnings.append("map has {} Landscape actor(s) - landscapes have no static mesh and were not exported.".format(landscapes))
+        warn(warnings[-1])
+
+    return placements, lights, meshes, warnings
+
+
+def drop_scatter_meshes(placements, meshes, warnings):
+    """Drop every placement of meshes placed absurdly often - that's PCG/foliage scatter,
+    which would bloat the prefab into six figures of GameObjects."""
+    max_per_mesh = int(os.environ.get("UE_EXPORT_MAX_MESH_PLACEMENTS", "2000"))
+    if max_per_mesh <= 0:
+        return placements
+
+    counts = {}
+    for p in placements:
+        counts[p["mesh"]] = counts.get(p["mesh"], 0) + 1
+
+    drop = {gp for gp, n in counts.items() if n > max_per_mesh}
+    for gp in sorted(drop):
+        warnings.append("dropped all {} placements of {} (over UE_EXPORT_MAX_MESH_PLACEMENTS={} - treated as scatter)".format(
+            counts[gp], gp, max_per_mesh))
+        warn(warnings[-1])
+        meshes.pop(gp, None)
+
+    if not drop:
+        return placements
+    return [p for p in placements if p["mesh"] not in drop]
+
+
+def export_meshes(meshes, out_dir, manifest):
+    """Run the standard per-mesh export (FBX + textures + material bindings)."""
+    exported_textures = {}   # texture object path -> exported relpath (dedupe shared textures)
+
+    for i, mesh in enumerate(meshes):
+        name = mesh.get_name()
+        log("[{}/{}] {}".format(i + 1, len(meshes), name))
+
+        fbx_rel = export_one(mesh, out_dir, "fbx", options=fbx_options())
+        if fbx_rel is None:
+            continue
+
+        materials = texture_bindings_for_mesh(mesh, out_dir, exported_textures)
+        manifest["assets"].append({
+            "asset": name,
+            "game_path": mesh_game_path(mesh),
+            "fbx": fbx_rel,
+            "import_scale": 0.3937,           # Unreal cm -> Source inch (1 / 2.54)
+            "materials": materials,
+        })
+
+    return exported_textures
+
+
+def scene_mode(map_path, out_dir, limit):
+    log("=== ue_export: scene mode, map {} -> {} ===".format(map_path, out_dir))
+
+    if not unreal.EditorLoadingAndSavingUtils.load_map(map_path):
+        err("could not load map: {}".format(map_path))
+        return None
+
+    load_world_partition_actors()
+
+    try:
+        actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
+    except Exception:
+        actors = unreal.EditorLevelLibrary.get_all_level_actors()
+
+    placements, lights, mesh_map, scene_warnings = collect_scene(actors)
+    placements = drop_scatter_meshes(placements, mesh_map, scene_warnings)
+    log("{} actors -> {} placements, {} lights, {} unique meshes".format(
+        len(actors), len(placements), len(lights), len(mesh_map)))
+
+    meshes = list(mesh_map.values())
+    if limit > 0:
+        meshes = meshes[:limit]
+        kept = {mesh_game_path(m) for m in meshes}
+        placements = [p for p in placements if p["mesh"] in kept]
+        log("Limiting to first {} meshes ({} placements)".format(limit, len(placements)))
+
+    manifest = {"version": 1, "assets": []}
+    exported_textures = export_meshes(meshes, out_dir, manifest)
+
+    manifest["scene"] = {
+        "name": map_path.rstrip("/").split("/")[-1],
+        "map": map_path,
+        "placements": placements,
+        "lights": lights,
+        "warnings": scene_warnings,
+    }
+    return manifest, exported_textures
+
+
 def main():
     out_dir = get_out_dir()
+    limit = int(os.environ.get("UE_EXPORT_LIMIT", CONFIG_LIMIT))
+
+    map_path = os.environ.get("UE_EXPORT_MAP")
+    if map_path:
+        result = scene_mode(map_path, out_dir, limit)
+        if result is None:
+            return
+        manifest, exported_textures = result
+
+        manifest_path = os.path.join(out_dir, "manifest.json")
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+        log("=== wrote {} ({} assets, {} textures, {} placements) ===".format(
+            manifest_path, len(manifest["assets"]), len(exported_textures),
+            len(manifest["scene"]["placements"])))
+        return
 
     # Explicit selection (UE_EXPORT_ASSETS, ';'-separated /Game paths) takes priority;
     # otherwise scan whole content paths (UE_EXPORT_PATHS).
@@ -379,29 +641,12 @@ def main():
         meshes = list_static_meshes(paths)
     log("Found {} static mesh(es)".format(len(meshes)))
 
-    limit = int(os.environ.get("UE_EXPORT_LIMIT", CONFIG_LIMIT))
     if limit > 0:
         meshes = meshes[:limit]
         log("Limiting to first {}".format(limit))
 
-    exported_textures = {}   # texture object path -> exported relpath (dedupe shared textures)
     manifest = {"version": 1, "assets": []}
-
-    for i, mesh in enumerate(meshes):
-        name = mesh.get_name()
-        log("[{}/{}] {}".format(i + 1, len(meshes), name))
-
-        fbx_rel = export_one(mesh, out_dir, "fbx", options=fbx_options())
-        if fbx_rel is None:
-            continue
-
-        materials = texture_bindings_for_mesh(mesh, out_dir, exported_textures)
-        manifest["assets"].append({
-            "asset": name,
-            "fbx": fbx_rel,
-            "import_scale": 0.3937,           # Unreal cm -> Source inch (1 / 2.54)
-            "materials": materials,
-        })
+    exported_textures = export_meshes(meshes, out_dir, manifest)
 
     manifest_path = os.path.join(out_dir, "manifest.json")
     with open(manifest_path, "w") as f:

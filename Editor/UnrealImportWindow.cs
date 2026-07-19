@@ -26,6 +26,13 @@ public class UnrealImportWindow : Widget
 		public bool Selected = true;
 	}
 
+	class MapEntry
+	{
+		public string GamePath;     // /Game/.../Maps/Demonstration
+		public string AbsPath;      // ...\Content\...\Demonstration.umap
+		public string Display;
+	}
+
 	/// <summary>
 	/// The thumbnail Unreal embedded in the .uasset, loaded lazily off the main thread.
 	/// Shows a placeholder icon until resolved; assets without a thumbnail keep it.
@@ -86,6 +93,7 @@ public class UnrealImportWindow : Widget
 	string searchFilter = "";
 
 	readonly List<MeshEntry> entries = new();
+	readonly List<MapEntry> mapEntries = new();
 
 	Label projectLabel;
 	Label outputLabel;
@@ -248,10 +256,26 @@ public class UnrealImportWindow : Widget
 	void ScanMeshes()
 	{
 		entries.Clear();
+		mapEntries.Clear();
 
 		var content = Path.Combine( uprojectFolder, "Content" );
 		if ( Directory.Exists( content ) )
 		{
+			foreach ( var file in new DirectoryInfo( content ).EnumerateFiles( "*.umap", SearchOption.AllDirectories ) )
+			{
+				var gamePath = HeadlessExporter.ToGamePath( uprojectFolder, file.FullName );
+				if ( gamePath.EndsWith( ".umap", StringComparison.OrdinalIgnoreCase ) )
+					gamePath = gamePath[..^".umap".Length];
+
+				mapEntries.Add( new MapEntry
+				{
+					AbsPath = file.FullName,
+					GamePath = gamePath,
+					Display = gamePath.StartsWith( "/Game/" ) ? gamePath["/Game/".Length..] : gamePath,
+				} );
+			}
+			mapEntries.Sort( ( a, b ) => string.CompareOrdinal( a.GamePath, b.GamePath ) );
+
 			// FileInfo rather than plain paths so we get the size without a second stat per file.
 			foreach ( var file in new DirectoryInfo( content ).EnumerateFiles( "*.uasset", SearchOption.AllDirectories ) )
 			{
@@ -305,6 +329,23 @@ public class UnrealImportWindow : Widget
 		return $"{bytes} B";
 	}
 
+	/// <summary>Maps matching the current search box.</summary>
+	IEnumerable<MapEntry> FilteredMaps()
+	{
+		if ( string.IsNullOrWhiteSpace( searchFilter ) )
+			return mapEntries;
+
+		var term = searchFilter.Trim();
+		return mapEntries.Where( e => e.Display.Contains( term, StringComparison.OrdinalIgnoreCase ) );
+	}
+
+	void AddSectionHeader( Widget canvas, string text )
+	{
+		var label = new Label( text, canvas );
+		label.SetStyles( "font-weight: bold;" );
+		canvas.Layout.Add( label );
+	}
+
 	void RebuildList()
 	{
 		var canvas = new Widget( listScroll );
@@ -313,6 +354,37 @@ public class UnrealImportWindow : Widget
 		canvas.Layout.Spacing = 2;
 
 		var visible = Filtered().ToList();
+		var visibleMaps = FilteredMaps().ToList();
+
+		if ( visibleMaps.Count > 0 )
+		{
+			AddSectionHeader( canvas, $"Maps ({visibleMaps.Count})" );
+
+			foreach ( var e in visibleMaps )
+			{
+				var entry = e;
+
+				var row = new Widget( canvas );
+				row.Layout = Layout.Row();
+				row.Layout.Spacing = 8;
+
+				row.Layout.Add( new ThumbnailWidget( entry.AbsPath, row ) );
+
+				var label = new Label( entry.Display, row ) { WordWrap = false };
+				row.Layout.Add( label, 1 );
+
+				row.Layout.Add( new Button( "Import Map", "public", row )
+				{
+					ToolTip = "Export every mesh this level uses and build a prefab of its layout",
+					Clicked = () => _ = DoImportMap( entry ),
+				} );
+
+				canvas.Layout.Add( row );
+			}
+
+			canvas.Layout.AddSpacingCell( 8 );
+			AddSectionHeader( canvas, $"Meshes ({visible.Count})" );
+		}
 
 		if ( entries.Count == 0 )
 		{
@@ -399,6 +471,76 @@ public class UnrealImportWindow : Widget
 	
 	
 
+	/// <summary>Locate ue_export.py + the right UnrealEditor-Cmd, dialoging on failure.</summary>
+	bool TryResolveTools( out string script, out string editorCmd )
+	{
+		editorCmd = null;
+		script = HeadlessExporter.FindExportScript();
+		if ( script is null )
+		{
+			EditorUtility.DisplayDialog( "Export script missing", "Could not find Tools/ue_export.py in this library." );
+			return false;
+		}
+
+		var engineVersion = UnrealLocator.ReadEngineAssociation( uprojectPath );
+		editorCmd = UnrealLocator.FindEditorCmd( engineVersion );
+		if ( editorCmd is null )
+		{
+			EditorUtility.DisplayDialog( "Unreal not found",
+				$"Couldn't locate UnrealEditor-Cmd.exe for engine '{engineVersion}'.\nIs Unreal installed under Epic Games?" );
+			return false;
+		}
+
+		return true;
+	}
+
+	async Task DoImportMap( MapEntry map )
+	{
+		if ( string.IsNullOrEmpty( outputFolder ) )
+		{
+			EditorUtility.DisplayDialog( "No output folder", "Pick an output folder (inside Assets/) first." );
+			return;
+		}
+
+		if ( !TryResolveTools( out var script, out var editorCmd ) )
+			return;
+
+		await Task.Delay( 100 );
+
+		statusLabel.Text = $"Importing map {map.Display}... this exports every mesh the level uses and can take a while.";
+
+		using var progress = Application.Editor.ProgressSection();
+		progress.Title = $"Importing map {map.Display}";
+		var progressToken = progress.GetCancel();
+
+		try
+		{
+			var export = await HeadlessExporter.Run( editorCmd, uprojectPath, Enumerable.Empty<string>(), script, progressToken, mapGamePath: map.GamePath );
+			if ( !export.Success )
+			{
+				EditorUtility.DisplayDialog( "Map export failed", export.Error ?? "Unknown error.", icon: "⚠️" );
+				statusLabel.Text = "Map export failed.";
+				return;
+			}
+
+			var manifest = ImportManifest.Load( export.ManifestPath );
+			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value );
+
+			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n" +
+				$"{summary.Placements} placement(s) written to:\n{summary.PrefabPath}";
+			if ( summary.Warnings.Count > 0 )
+				msg += "\n\nWarnings:\n - " + string.Join( "\n - ", summary.Warnings.Take( 10 ) );
+
+			EditorUtility.DisplayDialog( "Map import complete", msg, icon: "✅" );
+			statusLabel.Text = $"Done: {summary.Placements} placements, {summary.Models} models.";
+		}
+		catch ( Exception e )
+		{
+			EditorUtility.DisplayDialog( "Map import error", e.ToString(), icon: "⚠️" );
+			statusLabel.Text = "Map import error.";
+		}
+	}
+
 	async Task DoExport()
 	{
 		// Deliberately ignores the search filter - ticks persist across filtering, so everything
@@ -410,21 +552,8 @@ public class UnrealImportWindow : Widget
 			return;
 		}
 
-		var script = HeadlessExporter.FindExportScript();
-		if ( script is null )
-		{
-			EditorUtility.DisplayDialog( "Export script missing", "Could not find Tools/ue_export.py in this library." );
+		if ( !TryResolveTools( out var script, out var editorCmd ) )
 			return;
-		}
-
-		var engineVersion = UnrealLocator.ReadEngineAssociation( uprojectPath );
-		var editorCmd = UnrealLocator.FindEditorCmd( engineVersion );
-		if ( editorCmd is null )
-		{
-			EditorUtility.DisplayDialog( "Unreal not found",
-				$"Couldn't locate UnrealEditor-Cmd.exe for engine '{engineVersion}'.\nIs Unreal installed under Epic Games?" );
-			return;
-		}
 
 		await Task.Delay( 100 );
 
