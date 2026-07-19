@@ -11,6 +11,11 @@ namespace Editor.UnrealImporter;
 /// Editor tool: pick an Unreal project folder, tick the static meshes to bring over, and export
 /// them to sbox (FBX + vmat + vmdl) via a headless Unreal pass + kv3 generation.
 ///
+/// The browser is a folder tree mirroring /Game. Folder checkboxes (tri-state) tick whole
+/// subtrees, maps sit inline in their folders (double-click to import), and each mesh row
+/// shows the triangle count read straight from the .uasset's embedded asset-registry tags.
+/// Searching flattens the tree to matches.
+///
 /// TODO: max texture resolution selection
 /// TODO: make async with progress bar
 /// </summary>
@@ -23,6 +28,7 @@ public class UnrealImportWindow : Widget
 		public string AbsPath;      // ...\Content\...\SM_X.uasset
 		public string Display;      // GamePath without the /Game/ prefix
 		public long SizeBytes;      // .uasset on disk (uncooked, so this is the whole asset)
+		public long Triangles = -1; // from the uasset's asset-registry tags; -1 until read
 		public bool Selected = true;
 	}
 
@@ -33,57 +39,289 @@ public class UnrealImportWindow : Widget
 		public string Display;
 	}
 
-	/// <summary>
-	/// The thumbnail Unreal embedded in the .uasset, loaded lazily off the main thread.
-	/// Shows a placeholder icon until resolved; assets without a thumbnail keep it.
-	/// </summary>
-	class ThumbnailWidget : Widget
+	class FolderBucket
 	{
-		const int ThumbSize = 40;
+		public readonly SortedSet<string> Subfolders = new( StringComparer.OrdinalIgnoreCase );
+		public readonly List<MeshEntry> Meshes = new();
+		public readonly List<MapEntry> Maps = new();
+
+		/// <summary>Every mesh anywhere below this folder - drives the tri-state checkbox.</summary>
+		public readonly List<MeshEntry> Subtree = new();
+	}
+
+	const float CheckWidth = 26;
+	const float ThumbSize = 34;
+
+	interface ICheckRow
+	{
+		void OnCheckClicked();
+	}
+
+	/// <summary>TreeView that routes clicks on the leading checkbox column to the row.</summary>
+	class ImportTreeView : TreeView
+	{
+		public ImportTreeView( Widget parent ) : base( parent ) { }
+
+		protected override bool OnItemPressed( VirtualWidget pressedItem, MouseEvent e )
+		{
+			if ( e.LeftMouseButton && pressedItem.Object is ICheckRow row )
+			{
+				var box = pressedItem.Rect;
+				box.Left += IndentWidth * pressedItem.Column + ExpandWidth;
+				box.Width = CheckWidth;
+
+				if ( box.IsInside( e.LocalPosition ) )
+				{
+					row.OnCheckClicked();
+					Update();
+					return false;
+				}
+			}
+
+			return base.OnItemPressed( pressedItem, e );
+		}
+	}
+
+	class FolderNode : TreeNode, ICheckRow
+	{
+		readonly UnrealImportWindow win;
+		readonly string path;   // folder path relative to /Game ("" only for the virtual root)
+
+		public FolderNode( UnrealImportWindow win, string path )
+		{
+			this.win = win;
+			this.path = path;
+			Value = "folder:" + path;
+			Height = 26;
+		}
+
+		public override bool HasChildren => win.FolderHasChildren( path );
+
+		protected override void BuildChildren()
+		{
+			Clear();
+			AddItems( win.BuildFolderChildNodes( path ) );
+		}
+
+		public override void OnPaint( VirtualWidget item )
+		{
+			PaintSelection( item );
+			var r = item.Rect;
+
+			var (sel, total) = win.SubtreeSelection( path );
+
+			var check = r;
+			check.Width = CheckWidth;
+			Paint.SetPen( sel > 0 ? Theme.Primary : Theme.TextControl.WithAlpha( 0.5f ) );
+			Paint.DrawIcon( check, sel == 0 ? "check_box_outline_blank" : sel == total ? "check_box" : "indeterminate_check_box", 16, TextFlag.Center );
+
+			var icon = r;
+			icon.Left += CheckWidth;
+			icon.Width = 22;
+			Paint.SetPen( Theme.Yellow.WithAlpha( 0.8f ) );
+			Paint.DrawIcon( icon, item.IsOpen ? "folder_open" : "folder", 16, TextFlag.Center );
+
+			var meta = r;
+			meta.Right -= 6;
+			Paint.SetPen( Theme.TextControl.WithAlpha( 0.4f ) );
+			Paint.SetDefaultFont( 7 );
+			Paint.DrawText( meta, total == 1 ? "1 mesh" : $"{total} meshes", TextFlag.RightCenter );
+
+			var text = r;
+			text.Left += CheckWidth + 26;
+			text.Right -= 80;
+			Paint.SetPen( Theme.Text );
+			Paint.SetDefaultFont();
+			var name = path[(path.LastIndexOf( '/' ) + 1)..];
+			Paint.DrawText( text, name, TextFlag.LeftCenter );
+		}
+
+		public void OnCheckClicked()
+		{
+			var (sel, total) = win.SubtreeSelection( path );
+			win.SetFolderSelected( path, sel < total );
+		}
+	}
+
+	class MeshNode : TreeNode, ICheckRow
+	{
+		readonly UnrealImportWindow win;
+		readonly MeshEntry entry;
+		readonly bool fullPath;
 
 		Pixmap pixmap;
-		bool resolved;
+		bool thumbResolved;
 
-		public ThumbnailWidget( string absPath, Widget parent ) : base( parent )
+		public MeshNode( UnrealImportWindow win, MeshEntry entry, bool fullPath )
 		{
-			FixedSize = ThumbSize;
+			this.win = win;
+			this.entry = entry;
+			this.fullPath = fullPath;
+			Value = entry;
+			Height = 40;
 
-			if ( UassetThumbnail.TryGetCached( absPath, out pixmap ) )
+			if ( UassetThumbnail.TryGetCached( entry.AbsPath, out pixmap ) )
+				thumbResolved = true;
+			else
+				_ = ResolveThumb();
+
+			if ( entry.Triangles < 0 )
+				_ = ResolveStats();
+		}
+
+		async Task ResolveThumb()
+		{
+			pixmap = await UassetThumbnail.LoadAsync( entry.AbsPath );
+			thumbResolved = true;
+			TreeView?.Update();
+		}
+
+		async Task ResolveStats()
+		{
+			var stats = await UassetMeshStats.LoadAsync( entry.AbsPath );
+			if ( stats is not null )
 			{
-				resolved = true;
-				return;
+				entry.Triangles = stats.Triangles;
+				win.UpdateStatus();
 			}
-
-			_ = Resolve( absPath );
+			TreeView?.Update();
 		}
 
-		async Task Resolve( string absPath )
+		public override void OnPaint( VirtualWidget item )
 		{
-			var pm = await UassetThumbnail.LoadAsync( absPath );
+			PaintSelection( item );
+			var r = item.Rect;
 
-			// The list rebuilds on every keystroke, so this row may be gone by now.
-			if ( !IsValid )
-				return;
+			var check = r;
+			check.Width = CheckWidth;
+			Paint.SetPen( entry.Selected ? Theme.Primary : Theme.TextControl.WithAlpha( 0.5f ) );
+			Paint.DrawIcon( check, entry.Selected ? "check_box" : "check_box_outline_blank", 16, TextFlag.Center );
 
-			pixmap = pm;
-			resolved = true;
-			Update();
-		}
-
-		protected override void OnPaint()
-		{
+			var thumb = r;
+			thumb.Left += CheckWidth;
+			thumb.Width = ThumbSize;
+			thumb.Top += (r.Height - ThumbSize) / 2;
+			thumb.Height = ThumbSize;
 			Paint.ClearPen();
 			Paint.SetBrush( Theme.ControlBackground );
-			Paint.DrawRect( LocalRect, 3 );
-
+			Paint.DrawRect( thumb, 3 );
 			if ( pixmap is not null )
 			{
-				Paint.Draw( LocalRect, pixmap, 1, 3 );
-				return;
+				Paint.Draw( thumb, pixmap, 1, 3 );
+			}
+			else
+			{
+				Paint.SetPen( Theme.TextControl.WithAlpha( thumbResolved ? 0.25f : 0.1f ) );
+				Paint.DrawIcon( thumb, "view_in_ar", 18 );
 			}
 
-			Paint.SetPen( Theme.TextControl.WithAlpha( resolved ? 0.25f : 0.1f ) );
-			Paint.DrawIcon( LocalRect, "view_in_ar", 20 );
+			var meta = r;
+			meta.Right -= 6;
+			Paint.SetPen( Theme.TextControl.WithAlpha( 0.5f ) );
+			Paint.SetDefaultFont( 7 );
+			var label = entry.Triangles >= 0
+				? $"{FormatCount( entry.Triangles )} tris · {FormatSize( entry.SizeBytes )}"
+				: FormatSize( entry.SizeBytes );
+			Paint.DrawText( meta, label, TextFlag.RightCenter );
+
+			var text = r;
+			text.Left += CheckWidth + ThumbSize + 8;
+			text.Right -= 120;
+			Paint.SetPen( Theme.Text );
+			Paint.SetDefaultFont();
+			var name = fullPath ? entry.Display : entry.Display[(entry.Display.LastIndexOf( '/' ) + 1)..];
+			Paint.DrawText( text, name, TextFlag.LeftCenter );
+		}
+
+		public void OnCheckClicked()
+		{
+			entry.Selected = !entry.Selected;
+			win.UpdateStatus();
+		}
+
+		public override void OnActivated()
+		{
+			OnCheckClicked();
+			TreeView?.Update();
+		}
+	}
+
+	class MapNode : TreeNode
+	{
+		readonly UnrealImportWindow win;
+		readonly MapEntry entry;
+		readonly bool fullPath;
+
+		Pixmap pixmap;
+		bool thumbResolved;
+
+		public MapNode( UnrealImportWindow win, MapEntry entry, bool fullPath )
+		{
+			this.win = win;
+			this.entry = entry;
+			this.fullPath = fullPath;
+			Value = entry;
+			Height = 40;
+
+			if ( UassetThumbnail.TryGetCached( entry.AbsPath, out pixmap ) )
+				thumbResolved = true;
+			else
+				_ = ResolveThumb();
+		}
+
+		async Task ResolveThumb()
+		{
+			pixmap = await UassetThumbnail.LoadAsync( entry.AbsPath );
+			thumbResolved = true;
+			TreeView?.Update();
+		}
+
+		public override void OnPaint( VirtualWidget item )
+		{
+			PaintSelection( item );
+			var r = item.Rect;
+
+			var icon = r;
+			icon.Width = CheckWidth;
+			Paint.SetPen( Theme.Green.WithAlpha( 0.8f ) );
+			Paint.DrawIcon( icon, "public", 16, TextFlag.Center );
+
+			var thumb = r;
+			thumb.Left += CheckWidth;
+			thumb.Width = ThumbSize;
+			thumb.Top += (r.Height - ThumbSize) / 2;
+			thumb.Height = ThumbSize;
+			Paint.ClearPen();
+			Paint.SetBrush( Theme.ControlBackground );
+			Paint.DrawRect( thumb, 3 );
+			if ( pixmap is not null )
+			{
+				Paint.Draw( thumb, pixmap, 1, 3 );
+			}
+			else
+			{
+				Paint.SetPen( Theme.TextControl.WithAlpha( thumbResolved ? 0.25f : 0.1f ) );
+				Paint.DrawIcon( thumb, "public", 18 );
+			}
+
+			var meta = r;
+			meta.Right -= 6;
+			Paint.SetPen( Theme.TextControl.WithAlpha( 0.4f ) );
+			Paint.SetDefaultFont( 7 );
+			Paint.DrawText( meta, "map · double-click to import", TextFlag.RightCenter );
+
+			var text = r;
+			text.Left += CheckWidth + ThumbSize + 8;
+			text.Right -= 160;
+			Paint.SetPen( Theme.Text );
+			Paint.SetDefaultFont();
+			var name = fullPath ? entry.Display : entry.Display[(entry.Display.LastIndexOf( '/' ) + 1)..];
+			Paint.DrawText( text, name, TextFlag.LeftCenter );
+		}
+
+		public override void OnActivated()
+		{
+			win.DoImportMap( entry );
 		}
 	}
 
@@ -94,12 +332,14 @@ public class UnrealImportWindow : Widget
 
 	readonly List<MeshEntry> entries = new();
 	readonly List<MapEntry> mapEntries = new();
+	readonly Dictionary<string, FolderBucket> folders = new( StringComparer.OrdinalIgnoreCase );
+	List<TreeNode> rootNodes = new();
 
 	Label projectLabel;
 	Label outputLabel;
 	Label statusLabel;
 	LineEdit searchEdit;
-	ScrollArea listScroll;
+	ImportTreeView tree;
 	Button exportButton;
 	Checkbox flatCheckbox;
 
@@ -142,7 +382,7 @@ public class UnrealImportWindow : Widget
 			searchEdit.TextEdited += t =>
 			{
 				searchFilter = t ?? "";
-				RebuildList();
+				RefreshTree();
 				UpdateStatus();
 			};
 			Layout.Add( searchEdit );
@@ -158,10 +398,10 @@ public class UnrealImportWindow : Widget
 			Layout.Add( row );
 		}
 
-		// Mesh list
-		listScroll = new ScrollArea( this );
-		Layout.Add( listScroll, 1 );
-		RebuildList();
+		// Mesh tree
+		tree = new ImportTreeView( this );
+		tree.MultiSelect = false;
+		Layout.Add( tree, 1 );
 
 		// Output row
 		{
@@ -192,15 +432,15 @@ public class UnrealImportWindow : Widget
 			Layout.Add( row );
 		}
 
-		Width = 560;
-		MinimumWidth = 460;
-		Height = 640;
+		Width = 640;
+		MinimumWidth = 480;
+		Height = 680;
 
 		Show();
 		Focus();
 
 		var outputPath = EditorCookie.Get( "unreal_import_project_path", "" );
-		if (!string.IsNullOrEmpty( outputPath )  )
+		if ( !string.IsNullOrEmpty( outputPath ) )
 		{
 			Log.Info( $"UnrealImportWindow: restoring last project path: {outputPath}" );
 			uprojectPath = outputPath;
@@ -231,7 +471,7 @@ public class UnrealImportWindow : Widget
 		uprojectFolder = folder;
 		uprojectPath = uproject;
 		projectLabel.Text = $"{Path.GetFileName( uproject )}  ({Path.GetFileName( folder )})";
-		
+
 		EditorCookie.Set( "unreal_import_project_path", uprojectPath );
 		Log.Info( $"UnrealImportWindow: storing last project path: {uprojectPath}" );
 
@@ -306,10 +546,144 @@ public class UnrealImportWindow : Widget
 		}
 
 		entries.Sort( ( a, b ) => string.CompareOrdinal( a.GamePath, b.GamePath ) );
-		RebuildList();
+		BuildFolderIndex();
+		RefreshTree();
 		UpdateExportEnabled();
 		UpdateStatus();
+
+		_ = WarmStats( entries.ToList() );
 	}
+
+	/// <summary>
+	/// Background pass reading tri counts for everything, so folder rows and the status
+	/// total become accurate without expanding every folder. Throttled inside
+	/// UassetMeshStats; cached on disk so later opens are instant.
+	/// </summary>
+	async Task WarmStats( List<MeshEntry> list )
+	{
+		int done = 0;
+		foreach ( var e in list )
+		{
+			if ( !IsValid || !entries.Contains( e ) )
+				return;
+
+			if ( e.Triangles < 0 )
+			{
+				var stats = await UassetMeshStats.LoadAsync( e.AbsPath );
+				if ( stats is not null )
+					e.Triangles = stats.Triangles;
+			}
+
+			if ( ++done % 64 == 0 )
+			{
+				UpdateStatus();
+				tree?.Update();
+			}
+		}
+
+		if ( IsValid )
+		{
+			UpdateStatus();
+			tree?.Update();
+		}
+	}
+
+	// ---- folder index ----
+
+	static string ParentOf( string path ) => path.Contains( '/' ) ? path[..path.LastIndexOf( '/' )] : "";
+	static string DirOf( string display ) => display.Contains( '/' ) ? display[..display.LastIndexOf( '/' )] : "";
+
+	FolderBucket Bucket( string path )
+	{
+		if ( !folders.TryGetValue( path, out var b ) )
+			folders[path] = b = new FolderBucket();
+		return b;
+	}
+
+	void BuildFolderIndex()
+	{
+		folders.Clear();
+		Bucket( "" );
+
+		void RegisterChain( string dir )
+		{
+			while ( dir.Length > 0 )
+			{
+				var parent = ParentOf( dir );
+				Bucket( parent ).Subfolders.Add( dir );
+				Bucket( dir );
+				dir = parent;
+			}
+		}
+
+		foreach ( var e in entries )
+		{
+			var dir = DirOf( e.Display );
+			RegisterChain( dir );
+			Bucket( dir ).Meshes.Add( e );
+
+			for ( var p = dir; ; p = ParentOf( p ) )
+			{
+				Bucket( p ).Subtree.Add( e );
+				if ( p.Length == 0 )
+					break;
+			}
+		}
+
+		foreach ( var m in mapEntries )
+		{
+			var dir = DirOf( m.Display );
+			RegisterChain( dir );
+			Bucket( dir ).Maps.Add( m );
+		}
+
+		rootNodes = BuildFolderChildNodes( "" ).ToList();
+	}
+
+	bool FolderHasChildren( string path )
+		=> folders.TryGetValue( path, out var b ) && (b.Subfolders.Count > 0 || b.Meshes.Count > 0 || b.Maps.Count > 0);
+
+	IEnumerable<TreeNode> BuildFolderChildNodes( string path )
+	{
+		if ( !folders.TryGetValue( path, out var b ) )
+			yield break;
+
+		foreach ( var sub in b.Subfolders )
+			yield return new FolderNode( this, sub );
+
+		foreach ( var m in b.Maps )
+			yield return new MapNode( this, m, fullPath: false );
+
+		foreach ( var e in b.Meshes )
+			yield return new MeshNode( this, e, fullPath: false );
+	}
+
+	(int selected, int total) SubtreeSelection( string path )
+	{
+		if ( !folders.TryGetValue( path, out var b ) )
+			return (0, 0);
+
+		int sel = 0;
+		foreach ( var e in b.Subtree )
+			if ( e.Selected )
+				sel++;
+
+		return (sel, b.Subtree.Count);
+	}
+
+	void SetFolderSelected( string path, bool on )
+	{
+		if ( !folders.TryGetValue( path, out var b ) )
+			return;
+
+		foreach ( var e in b.Subtree )
+			e.Selected = on;
+
+		UpdateStatus();
+		tree?.Update();
+	}
+
+	// ---- filtering / tree ----
 
 	/// <summary>Entries matching the current search box, in list order.</summary>
 	IEnumerable<MeshEntry> Filtered()
@@ -319,14 +693,6 @@ public class UnrealImportWindow : Widget
 
 		var term = searchFilter.Trim();
 		return entries.Where( e => e.Display.Contains( term, StringComparison.OrdinalIgnoreCase ) );
-	}
-
-	static string FormatSize( long bytes )
-	{
-		if ( bytes >= 1024L * 1024 * 1024 ) return $"{bytes / (1024f * 1024 * 1024):0.##} GB";
-		if ( bytes >= 1024 * 1024 ) return $"{bytes / (1024f * 1024):0.#} MB";
-		if ( bytes >= 1024 ) return $"{bytes / 1024f:0} KB";
-		return $"{bytes} B";
 	}
 
 	/// <summary>Maps matching the current search box.</summary>
@@ -339,93 +705,46 @@ public class UnrealImportWindow : Widget
 		return mapEntries.Where( e => e.Display.Contains( term, StringComparison.OrdinalIgnoreCase ) );
 	}
 
-	void AddSectionHeader( Widget canvas, string text )
+	/// <summary>Tree of folders normally; a flat list of matches while searching.</summary>
+	void RefreshTree()
 	{
-		var label = new Label( text, canvas );
-		label.SetStyles( "font-weight: bold;" );
-		canvas.Layout.Add( label );
-	}
+		if ( tree is null )
+			return;
 
-	void RebuildList()
-	{
-		var canvas = new Widget( listScroll );
-		canvas.Layout = Layout.Column();
-		canvas.Layout.Margin = 4;
-		canvas.Layout.Spacing = 2;
-
-		var visible = Filtered().ToList();
-		var visibleMaps = FilteredMaps().ToList();
-
-		if ( visibleMaps.Count > 0 )
+		if ( string.IsNullOrWhiteSpace( searchFilter ) )
 		{
-			AddSectionHeader( canvas, $"Maps ({visibleMaps.Count})" );
+			// Persistent nodes, so folder expansion survives search round-trips.
+			tree.SetItems( rootNodes );
 
-			foreach ( var e in visibleMaps )
-			{
-				var entry = e;
-
-				var row = new Widget( canvas );
-				row.Layout = Layout.Row();
-				row.Layout.Spacing = 8;
-
-				row.Layout.Add( new ThumbnailWidget( entry.AbsPath, row ) );
-
-				var label = new Label( entry.Display, row ) { WordWrap = false };
-				row.Layout.Add( label, 1 );
-
-				row.Layout.Add( new Button( "Import Map", "public", row )
-				{
-					ToolTip = "Export every mesh this level uses and build a prefab of its layout",
-					Clicked = () => _ = DoImportMap( entry ),
-				} );
-
-				canvas.Layout.Add( row );
-			}
-
-			canvas.Layout.AddSpacingCell( 8 );
-			AddSectionHeader( canvas, $"Meshes ({visible.Count})" );
-		}
-
-		if ( entries.Count == 0 )
-		{
-			canvas.Layout.Add( new Label( "Pick a project to list its meshes.", canvas ) );
-		}
-		else if ( visible.Count == 0 )
-		{
-			canvas.Layout.Add( new Label( $"No meshes match \"{searchFilter.Trim()}\".", canvas ) );
+			if ( rootNodes.Count == 1 )
+				tree.Open( rootNodes[0] );
 		}
 		else
 		{
-			foreach ( var e in visible )
-			{
-				// Selection lives on the entry, not the checkbox - the list is rebuilt on every
-				// keystroke, so ticks would otherwise be lost as soon as an entry is filtered out.
-				var entry = e;
+			var flat = new List<TreeNode>();
+			flat.AddRange( FilteredMaps().Select( m => (TreeNode)new MapNode( this, m, fullPath: true ) ) );
+			flat.AddRange( Filtered().Select( e => (TreeNode)new MeshNode( this, e, fullPath: true ) ) );
 
-				var row = new Widget( canvas );
-				row.Layout = Layout.Row();
-				row.Layout.Spacing = 8;
+			if ( flat.Count == 0 )
+				flat.Add( new TreeNode( $"No matches for \"{searchFilter.Trim()}\"" ) );
 
-				row.Layout.Add( new ThumbnailWidget( entry.AbsPath, row ) );
-
-				var check = new Checkbox( entry.Display, row ) { Value = entry.Selected };
-				check.Toggled = () =>
-				{
-					entry.Selected = check.Value;
-					UpdateStatus();
-				};
-				row.Layout.Add( check, 1 );
-
-				var size = new Label( FormatSize( entry.SizeBytes ), row ) { WordWrap = false };
-				size.Color = Theme.TextControl.WithAlpha( 0.5f );
-				row.Layout.Add( size );
-
-				canvas.Layout.Add( row );
-			}
+			tree.SetItems( flat );
 		}
+	}
 
-		canvas.Layout.AddStretchCell();
-		listScroll.Canvas = canvas;
+	static string FormatSize( long bytes )
+	{
+		if ( bytes >= 1024L * 1024 * 1024 ) return $"{bytes / (1024f * 1024 * 1024):0.##} GB";
+		if ( bytes >= 1024 * 1024 ) return $"{bytes / (1024f * 1024):0.#} MB";
+		if ( bytes >= 1024 ) return $"{bytes / 1024f:0} KB";
+		return $"{bytes} B";
+	}
+
+	static string FormatCount( long n )
+	{
+		if ( n >= 1_000_000 ) return $"{n / 1_000_000f:0.##}M";
+		if ( n >= 1_000 ) return $"{n / 1_000f:0.#}k";
+		return $"{n}";
 	}
 
 	/// <summary>Ticks or unticks everything currently shown - the search filter narrows this.</summary>
@@ -434,7 +753,7 @@ public class UnrealImportWindow : Widget
 		foreach ( var e in Filtered() )
 			e.Selected = on;
 
-		RebuildList();
+		tree?.Update();
 		UpdateStatus();
 	}
 
@@ -456,9 +775,21 @@ public class UnrealImportWindow : Widget
 			? $"{entries.Count} static mesh(es) found."
 			: $"{shown} of {entries.Count} static mesh(es) shown.";
 
-		text += selected.Count > 0
-			? $"  {selected.Count} selected ({FormatSize( selected.Sum( e => e.SizeBytes ) )})."
-			: "  Nothing selected.";
+		if ( selected.Count > 0 )
+		{
+			text += $"  {selected.Count} selected ({FormatSize( selected.Sum( e => e.SizeBytes ) )}";
+
+			long tris = selected.Sum( e => Math.Max( 0, e.Triangles ) );
+			bool partial = selected.Any( e => e.Triangles < 0 );
+			if ( tris > 0 )
+				text += $", {FormatCount( tris )}{(partial ? "+" : "")} tris";
+
+			text += ").";
+		}
+		else
+		{
+			text += "  Nothing selected.";
+		}
 
 		statusLabel.Text = text;
 	}
@@ -468,8 +799,6 @@ public class UnrealImportWindow : Widget
 		if ( exportButton is not null )
 			exportButton.Enabled = entries.Count > 0 && !string.IsNullOrEmpty( outputFolder ) && !string.IsNullOrEmpty( uprojectPath );
 	}
-	
-	
 
 	/// <summary>Locate ue_export.py + the right UnrealEditor-Cmd, dialoging on failure.</summary>
 	bool TryResolveTools( out string script, out string editorCmd )
@@ -494,7 +823,15 @@ public class UnrealImportWindow : Widget
 		return true;
 	}
 
-	async Task DoImportMap( MapEntry map )
+	/// <summary>Double-clicking a map row lands here - confirm before kicking a long export.</summary>
+	void DoImportMap( MapEntry map )
+	{
+		EditorUtility.DisplayDialog( "Import map?",
+			$"Import {map.Display}?\n\nThis exports every mesh the level uses and builds a prefab of its layout. It can take a while.",
+			"Cancel", "Import", () => _ = RunImportMap( map ), "🌍" );
+	}
+
+	async Task RunImportMap( MapEntry map )
 	{
 		if ( string.IsNullOrEmpty( outputFolder ) )
 		{
@@ -558,7 +895,7 @@ public class UnrealImportWindow : Widget
 		await Task.Delay( 100 );
 
 		statusLabel.Text = $"Exporting {selected.Count} mesh(es) via headless Unreal... this can take a minute.";
-		
+
 		using var progress = Application.Editor.ProgressSection();
 
 		progress.Title = "Exporting meshes via headless Unreal";

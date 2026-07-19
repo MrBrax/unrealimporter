@@ -32,6 +32,26 @@ public static class SceneDebugTools
 		return result;
 	}
 
+	/// <summary>TEMP: read tri/vert counts from a .uasset via UassetMeshStats.</summary>
+	/// <param name="uassetPath">Absolute path to a .uasset.</param>
+	[McpTool( "unreal_meshstats_test" )]
+	public static async Task<string> MeshStatsTest( string uassetPath )
+	{
+		var stats = await UassetMeshStats.LoadAsync( uassetPath );
+		if ( stats is null )
+			return "no stats found";
+
+		return $"tris={stats.Triangles} verts={stats.Vertices} mats={stats.Materials} lods={stats.LODs}";
+	}
+
+	/// <summary>TEMP: open the Unreal Importer window for UI verification.</summary>
+	[McpTool( "unreal_open_import_window" )]
+	public static string OpenImportWindow()
+	{
+		_ = new UnrealImportWindow();
+		return "opened";
+	}
+
 	/// <summary>Load a model and report its bounds in inches.</summary>
 	/// <param name="modelPath">Model content path, e.g. "unrealimport/models/x.vmdl".</param>
 	[McpTool( "unreal_model_bounds" )]
