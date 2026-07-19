@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -34,12 +35,31 @@ public static class Kv3Writer
 		return c <= 0.0031308f ? c * 12.92f : 1.055f * System.MathF.Pow( c, 1f / 2.4f ) - 0.055f;
 	}
 
+	/// <summary>Chroma of an HDR color: components divided by the max (null/black -> white).</summary>
+	static float[] Normalized( float[] c )
+	{
+		if ( c is null || c.Length < 3 )
+			return new float[] { 1f, 1f, 1f, 1f };
+
+		float max = System.MathF.Max( c[0], System.MathF.Max( c[1], c[2] ) );
+		if ( max <= 0f )
+			return new float[] { 1f, 1f, 1f, 1f };
+
+		return new[] { c[0] / max, c[1] / max, c[2] / max, 1f };
+	}
+
 	/// <summary>
 	/// A complex.shader material. Texture arguments are Content-relative paths (forward slashes),
-	/// or null to omit that slot.
+	/// or null to omit that slot. alphaTest picks F_ALPHA_TEST over F_TRANSLUCENT for the alpha
+	/// map (UE Masked materials). selfIllumMask enables F_SELF_ILLUM: a grayscale albedo-alpha
+	/// mask (selfIllumFromAlbedoAlpha=true, glow tinted by the albedo) or a dedicated RGB
+	/// emissive texture. selfIllumBrightness is a LINEAR multiplier (converted to the shader's
+	/// pow2 exponent), selfIllumTint an Unreal LINEAR color.
 	/// </summary>
 	public static string VmatText( string color, string normal, string roughness, string metallic, string ao, string alpha = null,
-		string tintMask = null, float[] tintColor = null, float? tintAmount = null, string tintComment = null )
+		string tintMask = null, float[] tintColor = null, float? tintAmount = null, string tintComment = null,
+		bool alphaTest = false, string selfIllumMask = null, float[] selfIllumTint = null, float selfIllumBrightness = 1f,
+		bool selfIllumFromAlbedoAlpha = false )
 	{
 		var sb = new StringBuilder();
 		sb.AppendLine( "// THIS FILE IS AUTO-GENERATED (unreal_importer)" );
@@ -68,8 +88,31 @@ public static class Kv3Writer
 		{
 			sb.AppendLine();
 			sb.AppendLine( "\t//---- Alpha ----" );
-			sb.AppendLine( "\tF_TRANSLUCENT 1" );
+			if ( alphaTest )
+			{
+				sb.AppendLine( "\tF_ALPHA_TEST 1" );
+				sb.AppendLine( "\tg_flAlphaTestReference \"0.500\"" );
+			}
+			else
+			{
+				sb.AppendLine( "\tF_TRANSLUCENT 1" );
+			}
 			sb.AppendLine( $"\tTextureTranslucency \"{alpha}\"" );
+		}
+
+		if ( !string.IsNullOrEmpty( selfIllumMask ) )
+		{
+			float mag = MathF.Max( selfIllumBrightness, 0.001f );
+			var tint = Normalized( selfIllumTint );
+			sb.AppendLine();
+			sb.AppendLine( "\t//---- Self Illum ----" );
+			sb.AppendLine( "\tF_SELF_ILLUM 1" );
+			sb.AppendLine( $"\tTextureSelfIllumMask \"{selfIllumMask}\"" );
+			sb.AppendLine( $"\tg_vSelfIllumTint \"{ColorTint( tint )}\"" );
+			sb.AppendLine( $"\tg_flSelfIllumBrightness \"{F( Math.Clamp( MathF.Log2( mag ), -10f, 10f ) )}\"" );
+			sb.AppendLine( "\tg_flSelfIllumScale \"1.000\"" );
+			// Grayscale alpha masks carry no colour - let the albedo tint the glow.
+			sb.AppendLine( $"\tg_flSelfIllumAlbedoFactor \"{(selfIllumFromAlbedoAlpha ? "1.000" : "0.000")}\"" );
 		}
 
 		if ( !string.IsNullOrEmpty( ao ) )
@@ -136,8 +179,11 @@ public static class Kv3Writer
 	/// collision shape, and a 5-level auto-LOD chain (matches the flagpole reference).
 	/// hullMode: "HullPerElement" (default), "SingleHull", "HullPerMesh", or null for no
 	/// collision at all - dense foliage geometry can fail hull generation entirely.
+	/// mirror emits a ModelModifier_ScaleAndMirror flipping local X - unlike a negative
+	/// import_scale (which mirrors but leaves the triangle winding inverted, so faces
+	/// get culled from the wrong side), the modifier corrects winding properly.
 	/// </summary>
-	public static string VmdlText( string fbxContentPath, float importScale, IReadOnlyList<(string slot, string vmat)> remaps, string hullMode = "HullPerElement" )
+	public static string VmdlText( string fbxContentPath, float importScale, IReadOnlyList<(string slot, string vmat)> remaps, string hullMode = "HullPerElement", bool mirror = false )
 	{
 		var sb = new StringBuilder();
 		sb.AppendLine( "<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:modeldoc30:version{8c2d7a91-9c42-4bf0-883a-5a3b1762d4f1} -->" );
@@ -170,6 +216,26 @@ public static class Kv3Writer
 		sb.AppendLine( "\t\t\t\t\t}," );
 		sb.AppendLine( "\t\t\t\t]" );
 		sb.AppendLine( "\t\t\t}," );
+
+		// --- Mirror (proper winding-corrected flip across local X) ---
+		if ( mirror )
+		{
+			sb.AppendLine( "\t\t\t{" );
+			sb.AppendLine( "\t\t\t\t_class = \"ModelModifierList\"" );
+			sb.AppendLine( "\t\t\t\tchildren =" );
+			sb.AppendLine( "\t\t\t\t[" );
+			sb.AppendLine( "\t\t\t\t\t{" );
+			sb.AppendLine( "\t\t\t\t\t\t_class = \"ModelModifier_ScaleAndMirror\"" );
+			sb.AppendLine( "\t\t\t\t\t\tscale = 1.0" );
+			sb.AppendLine( "\t\t\t\t\t\tmirror_x = true" );
+			sb.AppendLine( "\t\t\t\t\t\tmirror_y = false" );
+			sb.AppendLine( "\t\t\t\t\t\tmirror_z = false" );
+			sb.AppendLine( "\t\t\t\t\t\tflip_bone_forward = false" );
+			sb.AppendLine( "\t\t\t\t\t\tswap_left_and_right_bones = false" );
+			sb.AppendLine( "\t\t\t\t\t}," );
+			sb.AppendLine( "\t\t\t\t]" );
+			sb.AppendLine( "\t\t\t}," );
+		}
 
 		// --- Collision (hull from render mesh) ---
 		if ( hullMode is not null )

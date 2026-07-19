@@ -17,6 +17,20 @@ public class ProcessedTextures
 	public string Ao;
 	public string Emissive;
 	public string TintMask;
+
+	/// <summary>Grayscale emissive mask extracted from the albedo's alpha (opaque materials with emissive params).</summary>
+	public string SelfIllumMask;
+}
+
+/// <summary>What the albedo's alpha channel means for this material - decided from the Unreal blend mode.</summary>
+public enum AlphaRole
+{
+	/// <summary>UE blends/masks with it - extract as a translucency/alpha-test map.</summary>
+	Translucency,
+	/// <summary>Opaque material with emissive params - the alpha is a self-illum mask.</summary>
+	SelfIllum,
+	/// <summary>Opaque, no emissive - the alpha packs something we can't interpret; ignore it.</summary>
+	Ignore,
 }
 
 /// <summary>
@@ -28,7 +42,7 @@ public class ProcessedTextures
 /// </summary>
 public static class TextureProcessor
 {
-	public static ProcessedTextures Process( ManifestMaterial mat, string stagingDir, string outputTextureDir, string baseName )
+	public static ProcessedTextures Process( ManifestMaterial mat, string stagingDir, string outputTextureDir, string baseName, AlphaRole alphaRole = AlphaRole.Translucency )
 	{
 		Directory.CreateDirectory( outputTextureDir );
 		var result = new ProcessedTextures();
@@ -45,8 +59,13 @@ public static class TextureProcessor
 				// the result, so we keep the albedo pristine and leave tint inert in the vmat.
 				result.Color = Save( alb, outputTextureDir, baseName, "color" );
 
-				if ( !alb.IsOpaque() )
-					result.Alpha = Save( ExtractAlpha( alb ), outputTextureDir, baseName, "alpha", dispose: true );
+				if ( !alb.IsOpaque() && alphaRole != AlphaRole.Ignore )
+				{
+					if ( alphaRole == AlphaRole.SelfIllum )
+						result.SelfIllumMask = Save( ExtractAlpha( alb ), outputTextureDir, baseName, "selfillum", dispose: true );
+					else
+						result.Alpha = Save( ExtractAlpha( alb ), outputTextureDir, baseName, "alpha", dispose: true );
+				}
 			}
 		}
 

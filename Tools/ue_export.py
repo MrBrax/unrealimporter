@@ -298,6 +298,33 @@ def pick_tint_amount(scalars):
     return None
 
 
+def enum_name(v):
+    """'<BlendMode.BLEND_OPAQUE: 0>' -> 'BLEND_OPAQUE'."""
+    return str(v).split(".")[-1].split(":")[0].strip(" >")
+
+
+def material_blend_mode(mi):
+    """Effective blend mode name ('BLEND_OPAQUE'/'BLEND_MASKED'/'BLEND_TRANSLUCENT'...),
+    honouring instance base-property overrides, else walking up to the parent material.
+    Matters downstream: an opaque material's albedo alpha is NOT opacity (it usually
+    packs an emissive mask), so translucency must only be emitted when UE really blends."""
+    obj = mi
+    try:
+        while isinstance(obj, unreal.MaterialInstance):
+            try:
+                bpo = obj.get_editor_property("base_property_overrides")
+                if bpo and bpo.get_editor_property("override_blend_mode"):
+                    return enum_name(bpo.get_editor_property("blend_mode"))
+            except Exception:
+                pass
+            obj = obj.get_editor_property("parent")
+        if obj is not None:
+            return enum_name(obj.get_editor_property("blend_mode"))
+    except Exception:
+        pass
+    return None
+
+
 def textures_from_dependencies(mi):
     """Fallback: every Texture this material package references (via the asset registry)."""
     ar = unreal.AssetRegistryHelpers.get_asset_registry()
@@ -362,6 +389,10 @@ def texture_bindings_for_mesh(mesh, out_dir, exported_textures):
             named_texs = [("", t) for t in textures_from_dependencies(mi)]
         log("  slot='{}' mi='{}' textures={}".format(
             slot, mi.get_name(), [t.get_name() for _, t in named_texs]))
+
+        blend_mode = material_blend_mode(mi)
+        if blend_mode:
+            entry["blend_mode"] = blend_mode
 
         # Scalar/vector params: keep the full set for fidelity, plus a best-guess tint.
         scalars = scalars_from_instance(mi)

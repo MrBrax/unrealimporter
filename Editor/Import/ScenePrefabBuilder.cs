@@ -29,12 +29,15 @@ public static class ScenePrefabBuilder
 
 	/// <summary>
 	/// Write &lt;scene name&gt;.prefab under outputRoot. modelsByGamePath maps the manifest's
-	/// /Game mesh paths to imported vmdl content paths. Returns the prefab's absolute path.
+	/// /Game mesh paths to imported vmdl content paths; mirroredByGamePath the variants for
+	/// mirrored (odd-negative-scale) placements. Returns the prefab's absolute path.
 	/// </summary>
-	public static string Build( ManifestScene scene, IReadOnlyDictionary<string, string> modelsByGamePath, string outputRoot, List<string> warnings )
+	public static string Build( ManifestScene scene, IReadOnlyDictionary<string, string> modelsByGamePath, string outputRoot, List<string> warnings,
+		IReadOnlyDictionary<string, string> mirroredByGamePath = null )
 	{
 		var children = new JsonArray();
 		var missingMeshes = new HashSet<string>();
+		var missingMirrors = new HashSet<string>();
 
 		foreach ( var p in scene.Placements ?? new() )
 		{
@@ -43,6 +46,15 @@ public static class ScenePrefabBuilder
 				if ( p.Mesh is not null )
 					missingMeshes.Add( p.Mesh );
 				continue;
+			}
+
+			// True mirrors (odd negative axes) swap to the mirrored model variant.
+			if ( p.Scale is { Length: >= 3 } && NegativeCount( p.Scale ) % 2 == 1 )
+			{
+				if ( mirroredByGamePath is not null && mirroredByGamePath.TryGetValue( p.Mesh, out var mirrored ) )
+					vmdl = mirrored;
+				else
+					missingMirrors.Add( p.Mesh );
 			}
 
 			var go = GameObjectNode( p.Name, p.Pos, p.Rot, p.Scale, isMesh: true );
@@ -54,6 +66,9 @@ public static class ScenePrefabBuilder
 			} ) );
 			children.Add( go );
 		}
+
+		foreach ( var m in missingMirrors )
+			warnings.Add( $"scene: no mirrored model for {m}, its flipped placements will render inside-out." );
 
 		foreach ( var l in scene.Lights ?? new() )
 		{
@@ -91,6 +106,9 @@ public static class ScenePrefabBuilder
 		if ( isMesh && scale.Length >= 3 )
 			scale = new[] { scale[1], scale[0], scale[2] };   // mesh local axes are swapped
 
+		var rot = ConvertRotation( ueRot, isMesh );
+		(rot, scale) = ResolveNegativeScale( rot, scale );
+
 		return new JsonObject
 		{
 			["__guid"] = Guid.NewGuid().ToString(),
@@ -98,10 +116,54 @@ public static class ScenePrefabBuilder
 			["Flags"] = 0,
 			["Name"] = string.IsNullOrEmpty( name ) ? "unnamed" : name,
 			["Position"] = Vec3( ConvertPosition( uePos ) ),
-			["Rotation"] = Quat( ConvertRotation( ueRot, isMesh ) ),
+			["Rotation"] = Quat( rot ),
 			["Scale"] = Vec3( scale ),
 			["Enabled"] = true,
 		};
+	}
+
+	static int NegativeCount( float[] s ) => (s[0] < 0 ? 1 : 0) + (s[1] < 0 ? 1 : 0) + (s[2] < 0 ? 1 : 0);
+
+	// 180° rotations about local X / Y / Z, quaternion xyzw.
+	static readonly float[][] Rot180 = { new float[] { 1, 0, 0, 0 }, new float[] { 0, 1, 0, 0 }, new float[] { 0, 0, 1, 0 } };
+
+	/// <summary>
+	/// s&amp;box doesn't flip triangle winding for negative GameObject scale, so negative axes
+	/// must not reach the prefab. diag(-a,-b,c) == rot180_z * diag(a,b,c): an EVEN number of
+	/// negative axes folds into a 180° local rotation (about the remaining positive axis).
+	/// An ODD count is a true mirror, served by the model's mirrored variant M = diag(-1,1,1)
+	/// (ScaleAndMirror across local X). The sign pattern factors as sign = M * Q with Q a
+	/// 180° rotation (sign matrices commute): negative x -> Q = identity; negative y ->
+	/// rot180_z; negative z -> rot180_y; all three -> rot180_x. Callers pick the mirrored
+	/// model for odd counts.
+	/// </summary>
+	static (float[] rot, float[] scale) ResolveNegativeScale( float[] rot, float[] scale )
+	{
+		if ( scale.Length < 3 || NegativeCount( scale ) == 0 )
+			return (rot, scale);
+
+		int negatives = NegativeCount( scale );
+		int axis = -1;
+		if ( negatives == 2 )
+		{
+			axis = Array.FindIndex( scale, v => v >= 0 );      // rotate about the positive axis
+		}
+		else if ( negatives == 1 )
+		{
+			// X-mirrored model: sign pattern (-,+,+) is the model itself; (+,-,+) needs
+			// rot180 about Z on top of it; (+,+,-) rot180 about Y.
+			int neg = Array.FindIndex( scale, v => v < 0 );
+			axis = neg switch { 1 => 2, 2 => 1, _ => -1 };
+		}
+		else if ( negatives == 3 )
+		{
+			axis = 0;                                          // (-,-,-) = M * rot180_x
+		}
+
+		if ( axis >= 0 )
+			rot = MulQuat( rot, Rot180[axis] );
+
+		return (rot, new[] { Math.Abs( scale[0] ), Math.Abs( scale[1] ), Math.Abs( scale[2] ) });
 	}
 
 	static JsonObject ComponentNode( string type, JsonObject properties )

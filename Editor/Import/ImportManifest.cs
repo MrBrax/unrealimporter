@@ -42,6 +42,9 @@ public class ManifestMaterial
 	/// <summary>Source Material Instance name (e.g. "MI_CardboardBoxes_01a") - used for vmat/texture naming + dedup.</summary>
 	[JsonPropertyName( "material" )] public string Material { get; set; }
 
+	/// <summary>Unreal blend mode name (BLEND_OPAQUE / BLEND_MASKED / BLEND_TRANSLUCENT...). Null on old manifests.</summary>
+	[JsonPropertyName( "blend_mode" )] public string BlendMode { get; set; }
+
 	// Texture role -> staging-relative png path. Null when the material doesn't use that role.
 	[JsonPropertyName( "alb" )] public string Alb { get; set; }
 	[JsonPropertyName( "nrm" )] public string Nrm { get; set; }

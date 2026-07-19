@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -50,6 +51,17 @@ public static class AssetImporter
 		// Track shared materials/textures so we only process them once.
 		var writtenVmats = new Dictionary<string, string>();   // base -> vmat content path
 		var modelsByGamePath = new Dictionary<string, string>();   // /Game path -> vmdl content path
+		var mirroredByGamePath = new Dictionary<string, string>(); // /Game path -> mirrored vmdl content path
+
+		// Scene placements with an odd number of negative scale axes are true mirrors -
+		// s&box doesn't flip winding for negative GameObject scale, so those need a
+		// mirrored model variant (negative vmdl import_scale bakes the mirror + winding).
+		var needsMirror = new HashSet<string>();
+		foreach ( var p in manifest.Scene?.Placements ?? new() )
+		{
+			if ( p.Mesh is not null && p.Scale is { Length: >= 3 } && p.Scale.Count( v => v < 0 ) % 2 == 1 )
+				needsMirror.Add( p.Mesh );
+		}
 
 		foreach ( var asset in manifest.Assets )
 		{
@@ -85,8 +97,14 @@ public static class AssetImporter
 
 				if ( !writtenVmats.TryGetValue( baseName, out var vmatContent ) )
 				{
-					var tex = TextureProcessor.Process( mat, stagingDir, texturesDir, baseName );
+					var emissive = EmissiveParams( mat );
+					var alphaRole = AlphaRoleFor( mat, emissive is not null );
+
+					var tex = TextureProcessor.Process( mat, stagingDir, texturesDir, baseName, alphaRole );
 					summary.Textures += CountTextures( tex );
+
+					// Self-illum source: dedicated emissive texture wins, else the albedo-alpha mask.
+					var selfIllumMask = tex.Emissive ?? tex.SelfIllumMask;
 
 					var vmatText = Kv3Writer.VmatText(
 						color: TexContent( assetsDir, texturesDir, tex.Color ),
@@ -100,7 +118,12 @@ public static class AssetImporter
 						tintMask: TexContent( assetsDir, texturesDir, tex.TintMask ),
 						tintColor: null,
 						tintAmount: null,
-						tintComment: TintComment( mat ) );
+						tintComment: TintComment( mat ),
+						alphaTest: mat.BlendMode?.Contains( "MASKED" ) == true,
+						selfIllumMask: TexContent( assetsDir, texturesDir, selfIllumMask ),
+						selfIllumTint: emissive?.tint,
+						selfIllumBrightness: emissive?.magnitude ?? 1f,
+						selfIllumFromAlbedoAlpha: tex.Emissive is null && tex.SelfIllumMask is not null );
 
 					var vmatPath = Path.Combine( materialsDir, baseName + ".vmat" );
 					await File.WriteAllTextAsync( vmatPath, vmatText, progressToken );
@@ -146,6 +169,23 @@ public static class AssetImporter
 			if ( !string.IsNullOrEmpty( asset.GamePath ) )
 				modelsByGamePath[asset.GamePath] = ToContentPath( assetsDir, vmdlPath );
 
+			// Mirrored variant for placements that flip this mesh. Uses the ScaleAndMirror
+			// model modifier (flip across local X, winding corrected) - NOT a negative
+			// import_scale, which mirrors the verts but leaves faces wound inside-out.
+			// The prefab builder composes a 180° rotation to turn the X-flip into whatever
+			// mirror the placement actually wants.
+			if ( asset.GamePath is not null && needsMirror.Contains( asset.GamePath ) )
+			{
+				var mirrorPath = Path.Combine( modelsDir, modelName + "_mirror.vmdl" );
+				await File.WriteAllTextAsync( mirrorPath, Kv3Writer.VmdlText( fbxContent, scale, remaps, usedHullMode ?? "HullPerElement", mirror: true ), progressToken );
+
+				var mirrorAsset = global::Editor.AssetSystem.RegisterFile( mirrorPath );
+				if ( mirrorAsset is not null && (!mirrorAsset.Compile( full: false ) || mirrorAsset.IsCompileFailed) )
+					summary.Warnings.Add( $"{asset.Asset}: mirrored variant failed to compile - mirrored placements will use the unmirrored model." );
+				else
+					mirroredByGamePath[asset.GamePath] = ToContentPath( assetsDir, mirrorPath );
+			}
+
 			Log.Info( $"[{manifest.Assets.IndexOf( asset ) + 1}/{manifest.Assets.Count}] Imported {asset.Asset} -> {vmdlPath}" +
 				(usedHullMode != "HullPerElement" ? $" (collision: {usedHullMode ?? "none"})" : "") );
 		}
@@ -156,11 +196,59 @@ public static class AssetImporter
 			if ( manifest.Scene.Warnings is { Count: > 0 } )
 				summary.Warnings.AddRange( manifest.Scene.Warnings );
 
-			summary.PrefabPath = ScenePrefabBuilder.Build( manifest.Scene, modelsByGamePath, outputRoot, summary.Warnings );
+			summary.PrefabPath = ScenePrefabBuilder.Build( manifest.Scene, modelsByGamePath, outputRoot, summary.Warnings, mirroredByGamePath );
 			summary.Placements = manifest.Scene.Placements?.Count ?? 0;
 		}
 
 		return summary;
+	}
+
+	/// <summary>
+	/// What the albedo's alpha channel means, from the Unreal blend mode. Opaque materials'
+	/// alpha is NOT opacity - with emissive params present it's a self-illum mask (lamp
+	/// housings etc.), otherwise it packs something we can't interpret and is ignored.
+	/// Old manifests without blend_mode keep the legacy translucency behaviour.
+	/// </summary>
+	static AlphaRole AlphaRoleFor( ManifestMaterial mat, bool hasEmissiveParams )
+	{
+		var blend = mat.BlendMode ?? "";
+		if ( blend.Length == 0 || blend.Contains( "TRANSLUCENT" ) || blend.Contains( "MASKED" )
+			|| blend.Contains( "ADDITIVE" ) || blend.Contains( "MODULATE" ) )
+			return AlphaRole.Translucency;
+
+		return hasEmissiveParams ? AlphaRole.SelfIllum : AlphaRole.Ignore;
+	}
+
+	/// <summary>
+	/// Emissive tint (Unreal LINEAR) + linear brightness multiplier from the Material
+	/// Instance's parameter overrides ("Emissive Multiply", "Emissive Color Multi", ...).
+	/// Null when the material has no emissive-ish parameter.
+	/// </summary>
+	static (float[] tint, float magnitude)? EmissiveParams( ManifestMaterial mat )
+	{
+		if ( mat.VectorParams is not null )
+		{
+			foreach ( var kv in mat.VectorParams )
+			{
+				if ( !kv.Key.Contains( "emissiv", StringComparison.OrdinalIgnoreCase ) || kv.Value is not { Length: >= 3 } )
+					continue;
+
+				float mag = Math.Max( kv.Value[0], Math.Max( kv.Value[1], kv.Value[2] ) );
+				if ( mag > 0 )
+					return (kv.Value, mag);
+			}
+		}
+
+		if ( mat.ScalarParams is not null )
+		{
+			foreach ( var kv in mat.ScalarParams )
+			{
+				if ( kv.Key.Contains( "emissiv", StringComparison.OrdinalIgnoreCase ) && kv.Value > 0 )
+					return (null, kv.Value);
+			}
+		}
+
+		return null;
 	}
 
 	/// <summary>Human-readable note of the tint colours Unreal had, so they can be wired up by hand.</summary>
@@ -201,6 +289,7 @@ public static class AssetImporter
 		if ( t.Ao != null ) n++;
 		if ( t.Emissive != null ) n++;
 		if ( t.TintMask != null ) n++;
+		if ( t.SelfIllumMask != null ) n++;
 		return n;
 	}
 
