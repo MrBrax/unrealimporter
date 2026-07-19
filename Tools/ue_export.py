@@ -65,7 +65,7 @@ ROLE_SUFFIXES = {
     "rough": ["_rough", "_roughness", "_r"],
     "metal": ["_metal", "_metallic", "_m"],
     "ao": ["_ao", "_occlusion"],
-    "emissive": ["_emissive", "_emis", "_e"],
+    "emissive": ["_emissive", "_emis", "_emm", "_glow", "_e"],
     "opacity": ["_opacity", "_mask", "_alpha"],
 }
 
