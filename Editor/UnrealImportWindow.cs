@@ -57,10 +57,76 @@ public class UnrealImportWindow : Widget
 		void OnCheckClicked();
 	}
 
-	/// <summary>TreeView that routes clicks on the leading checkbox column to the row.</summary>
+	/// <summary>A row that can supply a large hover preview.</summary>
+	interface IPreviewRow
+	{
+		Pixmap PreviewPixmap { get; }
+		string PreviewCaption { get; }
+	}
+
+	/// <summary>
+	/// Frameless tooltip window showing a row's embedded thumbnail at full size
+	/// (Unreal stores them at 256x256; the list shrinks them to 34px).
+	/// </summary>
+	class ThumbPreview : Widget
+	{
+		const float ImageSize = 256;
+		const float CaptionHeight = 20;
+		const float Pad = 8;
+
+		readonly Pixmap pixmap;
+		readonly string caption;
+
+		public object Key;
+
+		public ThumbPreview( Pixmap pixmap, string caption, Vector2 screenPos ) : base( null )
+		{
+			this.pixmap = pixmap;
+			this.caption = caption;
+
+			WindowFlags = WindowFlags.ToolTip | WindowFlags.FramelessWindowHint | WindowFlags.WindowDoesNotAcceptFocus;
+			FocusMode = FocusMode.None;
+			TransparentForMouseEvents = true;
+			ShowWithoutActivating = true;
+			NoSystemBackground = true;
+
+			Size = new Vector2( ImageSize + Pad * 2, ImageSize + CaptionHeight + Pad * 2 );
+			Position = screenPos;
+			Show();
+		}
+
+		protected override void OnPaint()
+		{
+			Paint.ClearPen();
+			Paint.SetBrushAndPen( Theme.ControlBackground, Theme.Border );
+			Paint.DrawRect( LocalRect );
+
+			var img = LocalRect.Shrink( Pad );
+			img.Height = ImageSize;
+			Paint.Draw( img, pixmap );
+
+			var text = LocalRect.Shrink( Pad );
+			text.Top += ImageSize;
+			Paint.SetPen( Theme.TextControl.WithAlpha( 0.8f ) );
+			Paint.SetDefaultFont( 7 );
+			Paint.DrawText( text, caption, TextFlag.Center );
+		}
+	}
+
+	/// <summary>
+	/// TreeView that routes clicks on the leading checkbox column to the row, and pops a
+	/// large thumbnail preview after hovering a mesh/map row briefly.
+	/// </summary>
 	class ImportTreeView : TreeView
 	{
-		public ImportTreeView( Widget parent ) : base( parent ) { }
+		ThumbPreview preview;
+		object hoverNode;
+		RealTimeSince hoverSince;
+
+		public ImportTreeView( Widget parent ) : base( parent )
+		{
+			MouseTracking = true;
+		}
 
 		protected override bool OnItemPressed( VirtualWidget pressedItem, MouseEvent e )
 		{
@@ -79,6 +145,57 @@ public class UnrealImportWindow : Widget
 			}
 
 			return base.OnItemPressed( pressedItem, e );
+		}
+
+		protected override void OnMouseMove( MouseEvent e )
+		{
+			base.OnMouseMove( e );
+
+			var node = GetItemAt( e.LocalPosition )?.Object;
+			if ( node == hoverNode )
+				return;
+
+			hoverNode = node;
+			hoverSince = 0;
+
+			if ( preview.IsValid() && preview.Key != node )
+			{
+				preview.Destroy();
+				preview = null;
+			}
+		}
+
+		protected override void OnMouseLeave()
+		{
+			base.OnMouseLeave();
+			ClearPreview();
+		}
+
+		public override void OnDestroyed()
+		{
+			base.OnDestroyed();
+			ClearPreview();
+		}
+
+		void ClearPreview()
+		{
+			hoverNode = null;
+			preview?.Destroy();
+			preview = null;
+		}
+
+		[EditorEvent.Frame]
+		public void ShowPreviewWhenSettled()
+		{
+			if ( preview.IsValid() || hoverNode is not IPreviewRow row || hoverSince < 0.35f )
+				return;
+
+			if ( row.PreviewPixmap is null )
+				return;
+
+			// To the right of the cursor, nudged up so the image is centred on the row.
+			var pos = Application.CursorPosition + new Vector2( 28, -140 );
+			preview = new ThumbPreview( row.PreviewPixmap, row.PreviewCaption, pos ) { Key = hoverNode };
 		}
 	}
 
@@ -143,7 +260,7 @@ public class UnrealImportWindow : Widget
 		}
 	}
 
-	class MeshNode : TreeNode, ICheckRow
+	class MeshNode : TreeNode, ICheckRow, IPreviewRow
 	{
 		readonly UnrealImportWindow win;
 		readonly MeshEntry entry;
@@ -151,6 +268,11 @@ public class UnrealImportWindow : Widget
 
 		Pixmap pixmap;
 		bool thumbResolved;
+
+		public Pixmap PreviewPixmap => pixmap;
+		public string PreviewCaption => entry.Triangles >= 0
+			? $"{entry.Display}  ·  {FormatCount( entry.Triangles )} tris"
+			: entry.Display;
 
 		public MeshNode( UnrealImportWindow win, MeshEntry entry, bool fullPath )
 		{
@@ -246,7 +368,7 @@ public class UnrealImportWindow : Widget
 		}
 	}
 
-	class MapNode : TreeNode
+	class MapNode : TreeNode, IPreviewRow
 	{
 		readonly UnrealImportWindow win;
 		readonly MapEntry entry;
@@ -254,6 +376,9 @@ public class UnrealImportWindow : Widget
 
 		Pixmap pixmap;
 		bool thumbResolved;
+
+		public Pixmap PreviewPixmap => pixmap;
+		public string PreviewCaption => $"{entry.Display}  ·  map";
 
 		public MapNode( UnrealImportWindow win, MapEntry entry, bool fullPath )
 		{
