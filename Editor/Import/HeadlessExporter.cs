@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Sandbox;
 
 namespace Editor.UnrealImporter;
 
@@ -69,6 +70,22 @@ public static class HeadlessExporter
 	public static async Task<ExportResult> Run( string editorCmd, string uprojectPath, IEnumerable<string> gameAssetPaths, string scriptPath, CancellationToken progressToken, string mapGamePath = null, Action<ExportEvent> onProgress = null )
 	{
 		var result = new ExportResult();
+
+		// Marketplace packs often force-enable plugins that no longer ship with the engine
+		// (NVIDIA Ansel is the classic) - Unreal hard-fatals on those at boot. Launch a
+		// sanitized temp .uproject with the missing ones marked Optional instead.
+		string tempUproject = null;
+		try
+		{
+			uprojectPath = SanitizeUproject( editorCmd, uprojectPath, out tempUproject );
+		}
+		catch ( Exception e )
+		{
+			Log.Warning( $"uproject plugin check failed, launching unmodified: {e.Message}" );
+		}
+
+		try
+		{
 
 		var stagingDir = Path.Combine( Path.GetTempPath(), "unrealimporter", Guid.NewGuid().ToString( "N" ) );
 		Directory.CreateDirectory( stagingDir );
@@ -149,6 +166,83 @@ public static class HeadlessExporter
 			result.Error = e.Message;
 			return result;
 		}
+
+		}
+		finally
+		{
+			if ( tempUproject is not null )
+			{
+				try { File.Delete( tempUproject ); }
+				catch { }
+			}
+		}
+	}
+
+	static readonly Dictionary<string, HashSet<string>> pluginScanCache = new( StringComparer.OrdinalIgnoreCase );
+
+	/// <summary>Names of every .uplugin discoverable under a directory (cached - engine trees are big).</summary>
+	static HashSet<string> AvailablePlugins( string dir )
+	{
+		if ( pluginScanCache.TryGetValue( dir, out var cached ) )
+			return cached;
+
+		var set = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
+		if ( Directory.Exists( dir ) )
+		{
+			foreach ( var f in Directory.EnumerateFiles( dir, "*.uplugin", SearchOption.AllDirectories ) )
+				set.Add( Path.GetFileNameWithoutExtension( f ) );
+		}
+
+		pluginScanCache[dir] = set;
+		return set;
+	}
+
+	/// <summary>
+	/// If the .uproject enables plugins that exist neither in the engine nor the project,
+	/// write a sibling temp .uproject with those entries marked Optional (Unreal skips
+	/// missing optional plugins instead of aborting) and return its path. Returns the
+	/// original path untouched when everything resolves. Caller deletes the temp file.
+	/// </summary>
+	static string SanitizeUproject( string editorCmd, string uprojectPath, out string tempUproject )
+	{
+		tempUproject = null;
+
+		var root = System.Text.Json.Nodes.JsonNode.Parse( File.ReadAllText( uprojectPath ) );
+		if ( root?["Plugins"] is not System.Text.Json.Nodes.JsonArray plugins || plugins.Count == 0 )
+			return uprojectPath;
+
+		var enabled = plugins
+			.Where( p => p?["Enabled"]?.GetValue<bool>() == true )
+			.Select( p => p?["Name"]?.GetValue<string>() )
+			.Where( n => !string.IsNullOrEmpty( n ) )
+			.ToList();
+		if ( enabled.Count == 0 )
+			return uprojectPath;
+
+		// editorCmd = <root>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe
+		var enginePlugins = Path.GetFullPath( Path.Combine( Path.GetDirectoryName( editorCmd ), "..", "..", "Plugins" ) );
+		var projFolder = Path.GetDirectoryName( uprojectPath );
+
+		var missing = enabled
+			.Where( n => !AvailablePlugins( enginePlugins ).Contains( n )
+				&& !AvailablePlugins( Path.Combine( projFolder, "Plugins" ) ).Contains( n )
+				&& !AvailablePlugins( Path.Combine( projFolder, "Mods" ) ).Contains( n ) )
+			.ToHashSet( StringComparer.OrdinalIgnoreCase );
+		if ( missing.Count == 0 )
+			return uprojectPath;
+
+		Log.Info( $"uproject enables plugin(s) missing from this engine: {string.Join( ", ", missing )} - marking Optional for the export run." );
+
+		foreach ( var p in plugins )
+		{
+			if ( p?["Name"]?.GetValue<string>() is string name && missing.Contains( name ) )
+				p["Optional"] = true;
+		}
+
+		// Same folder, so Content/ and /Game paths resolve identically.
+		tempUproject = Path.Combine( projFolder, Path.GetFileNameWithoutExtension( uprojectPath ) + ".sboximport.uproject" );
+		File.WriteAllText( tempUproject, root.ToJsonString( new System.Text.Json.JsonSerializerOptions { WriteIndented = true } ) );
+		return tempUproject;
 	}
 
 	/// <summary>

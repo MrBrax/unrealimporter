@@ -35,6 +35,9 @@ public static class UnrealLocator
 	/// <summary>
 	/// Find UnrealEditor-Cmd.exe, preferring the version the project targets.
 	/// Tries the registry first, then scans the standard Epic Games install root.
+	/// When the exact version isn't installed, prefers the CLOSEST NEWER engine
+	/// (a newer engine opens older assets; an older one can't read newer assets),
+	/// falling back to the highest older install.
 	/// </summary>
 	public static string FindEditorCmd( string engineVersion )
 	{
@@ -47,6 +50,8 @@ public static class UnrealLocator
 			Environment.GetEnvironmentVariable( "ProgramW6432" ),
 			Environment.GetEnvironmentVariable( "ProgramFiles" ),
 		}.Where( x => !string.IsNullOrEmpty( x ) ).Distinct();
+
+		Version.TryParse( engineVersion ?? "", out var wanted );
 
 		foreach ( var pf in roots )
 		{
@@ -61,13 +66,21 @@ public static class UnrealLocator
 					return exact;
 			}
 
-			// Fall back to the highest installed engine.
-			foreach ( var dir in Directory.GetDirectories( epic, "UE_*" ).OrderByDescending( x => x ) )
-			{
-				var cmd = CmdPath( dir );
-				if ( File.Exists( cmd ) )
-					return cmd;
-			}
+			var installed = Directory.GetDirectories( epic, "UE_*" )
+				.Where( d => File.Exists( CmdPath( d ) ) )
+				.Select( d => (dir: d, ver: Version.TryParse( Path.GetFileName( d )["UE_".Length..], out var v ) ? v : null) )
+				.Where( x => x.ver is not null )
+				.ToList();
+
+			if ( installed.Count == 0 )
+				continue;
+
+			var pick = wanted is not null
+				? installed.Where( x => x.ver >= wanted ).OrderBy( x => x.ver ).FirstOrDefault().dir
+					?? installed.OrderByDescending( x => x.ver ).First().dir
+				: installed.OrderByDescending( x => x.ver ).First().dir;
+
+			return CmdPath( pick );
 		}
 
 		return null;
