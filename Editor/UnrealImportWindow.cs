@@ -29,7 +29,7 @@ public class UnrealImportWindow : Widget
 		public string Display;      // GamePath without the /Game/ prefix
 		public long SizeBytes;      // .uasset on disk (uncooked, so this is the whole asset)
 		public long Triangles = -1; // from the uasset's asset-registry tags; -1 until read
-		public bool Selected = true;
+		public bool Selected;       // opt-in: nothing ticked until the user picks
 	}
 
 	class MapEntry
@@ -945,6 +945,20 @@ public class UnrealImportWindow : Widget
 			exportButton.Enabled = entries.Count > 0 && !string.IsNullOrEmpty( outputFolder ) && !string.IsNullOrEmpty( uprojectPath );
 	}
 
+	/// <summary>Push a live export/import event into the progress toast + status line.</summary>
+	void ApplyProgress( IProgressSection progress, ExportEvent ev )
+	{
+		if ( ev.Total is > 0 )
+			progress.TotalCount = ev.Total.Value;
+		if ( ev.Done is > 0 )
+			progress.Current = ev.Done.Value;
+		if ( !string.IsNullOrEmpty( ev.Message ) )
+		{
+			progress.Subtitle = ev.Message;
+			statusLabel.Text = ev.Done is > 0 && ev.Total is > 0 ? $"[{ev.Done}/{ev.Total}] {ev.Message}" : ev.Message;
+		}
+	}
+
 	/// <summary>Locate ue_export.py + the right UnrealEditor-Cmd, dialoging on failure.</summary>
 	bool TryResolveTools( out string script, out string editorCmd )
 	{
@@ -992,12 +1006,13 @@ public class UnrealImportWindow : Widget
 		statusLabel.Text = $"Importing map {map.Display}... this exports every mesh the level uses and can take a while.";
 
 		using var progress = Application.Editor.ProgressSection();
-		progress.Title = $"Importing map {map.Display}";
+		progress.Title = $"Exporting map {map.Display}";
 		var progressToken = progress.GetCancel();
 
 		try
 		{
-			var export = await HeadlessExporter.Run( editorCmd, uprojectPath, Enumerable.Empty<string>(), script, progressToken, mapGamePath: map.GamePath );
+			var export = await HeadlessExporter.Run( editorCmd, uprojectPath, Enumerable.Empty<string>(), script, progressToken, mapGamePath: map.GamePath,
+				onProgress: ev => ApplyProgress( progress, ev ) );
 			if ( !export.Success )
 			{
 				EditorUtility.DisplayDialog( "Map export failed", export.Error ?? "Unknown error.", icon: "⚠️" );
@@ -1005,8 +1020,10 @@ public class UnrealImportWindow : Widget
 				return;
 			}
 
+			progress.Title = $"Importing map {map.Display}";
 			var manifest = ImportManifest.Load( export.ManifestPath );
-			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value );
+			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
+				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n" +
 				$"{summary.Placements} placement(s) written to:\n{summary.PrefabPath}";
@@ -1043,13 +1060,14 @@ public class UnrealImportWindow : Widget
 
 		using var progress = Application.Editor.ProgressSection();
 
-		progress.Title = "Exporting meshes via headless Unreal";
+		progress.Title = "Exporting from Unreal";
 		progress.TotalCount = selected.Count;
 		var progressToken = progress.GetCancel();
 
 		try
 		{
-			var export = await HeadlessExporter.Run( editorCmd, uprojectPath, selected, script, progressToken );
+			var export = await HeadlessExporter.Run( editorCmd, uprojectPath, selected, script, progressToken,
+				onProgress: ev => ApplyProgress( progress, ev ) );
 			if ( !export.Success )
 			{
 				EditorUtility.DisplayDialog( "Export failed", export.Error ?? "Unknown error.", icon: "⚠️" );
@@ -1057,8 +1075,10 @@ public class UnrealImportWindow : Widget
 				return;
 			}
 
+			progress.Title = "Importing into s&box";
 			var manifest = ImportManifest.Load( export.ManifestPath );
-			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value );
+			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
+				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n\n" +
 				$"Output:\n{summary.OutputDir}";

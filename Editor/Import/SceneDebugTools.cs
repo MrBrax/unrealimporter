@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -42,6 +43,29 @@ public static class SceneDebugTools
 			return "no stats found";
 
 		return $"tris={stats.Triangles} verts={stats.Vertices} mats={stats.Materials} lods={stats.LODs}";
+	}
+
+	/// <summary>TEMP: run a small headless export and log the live progress events (verifies log tailing).</summary>
+	/// <param name="uprojectPath">Absolute path to the .uproject.</param>
+	/// <param name="assets">';'-separated /Game asset paths to export.</param>
+	[McpTool( "unreal_export_progress_test" )]
+	public static async Task<string> ExportProgressTest( string uprojectPath, string assets )
+	{
+		var script = HeadlessExporter.FindExportScript();
+		var editorCmd = UnrealLocator.FindEditorCmd( UnrealLocator.ReadEngineAssociation( uprojectPath ) );
+		if ( script is null || editorCmd is null )
+			return "tools not found";
+
+		var events = new List<string>();
+		var result = await HeadlessExporter.Run( editorCmd, uprojectPath, assets.Split( ';' ), script, System.Threading.CancellationToken.None,
+			onProgress: ev =>
+			{
+				var line = $"{ev.Done}/{ev.Total} {ev.Message}";
+				events.Add( line );
+				Log.Info( $"UEPROG {line}" );
+			} );
+
+		return $"success={result.Success} events={events.Count}\n" + string.Join( "\n", events.TakeLast( 12 ) );
 	}
 
 	/// <summary>TEMP: open the Unreal Importer window for UI verification.</summary>

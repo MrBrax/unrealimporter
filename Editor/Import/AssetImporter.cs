@@ -33,7 +33,8 @@ public static class AssetImporter
 	/// <param name="outputRoot"></param>
 	/// <param name="flat">When true, everything goes directly in outputRoot instead of models/materials/textures subfolders.</param>
 	/// <param name="progressToken"></param>
-	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false )
+	/// <param name="onProgress">(done, total, current asset name) per imported model.</param>
+	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false, Action<int, int, string> onProgress = null )
 	{
 		var summary = new ImportSummary { OutputDir = outputRoot };
 
@@ -65,6 +66,9 @@ public static class AssetImporter
 
 		foreach ( var asset in manifest.Assets )
 		{
+			progressToken.ThrowIfCancellationRequested();
+			onProgress?.Invoke( manifest.Assets.IndexOf( asset ) + 1, manifest.Assets.Count, asset.Asset );
+
 			if ( string.IsNullOrEmpty( asset.Fbx ) )
 			{
 				summary.Warnings.Add( $"{asset.Asset}: no fbx in manifest, skipped." );
