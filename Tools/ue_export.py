@@ -315,6 +315,34 @@ def textures_from_dependencies(mi):
     return out
 
 
+# Textures whose names mark them as secondary layers (blended by master materials we
+# can't replicate). Penalised when a primary texture competes for the same slot.
+SECONDARY_PATTERNS = ["overlay", "dirt", "grunge", "detail", "micro", "macro", "noise", "trash", "decal", "splat"]
+
+
+def material_tokens(mat_name):
+    """Meaningful lowercase tokens of a material name: 'MI_Floor_01' -> {'floor'}."""
+    tokens = set()
+    for t in (mat_name or "").lower().replace("-", "_").split("_"):
+        if t and not t.isdigit() and t not in ("mi", "mm", "m", "mat", "inst"):
+            tokens.add(t)
+    return tokens
+
+
+def texture_score(tex_name, mat_name, via_param):
+    """Rank candidates competing for one role: param-name classification beats filename
+    suffix, sharing a name token with the material helps, secondary layers lose."""
+    score = 0
+    lname = tex_name.lower()
+    if via_param:
+        score += 2
+    if any(tok and tok in lname for tok in material_tokens(mat_name)):
+        score += 1
+    if any(p in lname for p in SECONDARY_PATTERNS):
+        score -= 2
+    return score
+
+
 def texture_bindings_for_mesh(mesh, out_dir, exported_textures):
     """Return a list of {slot, <role>: relpath...} per material slot, exporting textures as needed."""
     materials = []
@@ -357,12 +385,29 @@ def texture_bindings_for_mesh(mesh, out_dir, exported_textures):
         if tint_amount is not None:
             entry["tint_amount"] = tint_amount
 
-        for pname, tex in named_texs:
+        # A material can reference several textures that classify to the same role
+        # (e.g. TX_floor_02_ALB + TX_dirtyoverlay_01_ALB are both 'alb' - the master
+        # material blends them, which we can't). Collect candidates and bind the best.
+        candidates = {}   # role -> (score, order, texture)
+        for order, (pname, tex) in enumerate(named_texs):
             # The parameter name (e.g. "Tint Mask") is more reliable than the filename suffix.
-            role = classify_param_name(pname) or classify_texture(tex.get_name())
+            role = classify_param_name(pname)
+            via_param = role is not None
+            if role is None:
+                role = classify_texture(tex.get_name())
             if role is None:
                 warn("    unclassified texture '{}' (param '{}') (skipped)".format(tex.get_name(), pname))
                 continue
+
+            score = (texture_score(tex.get_name(), mi.get_name(), via_param), -order)
+            prev = candidates.get(role)
+            if prev is not None:
+                loser = tex.get_name() if score < prev[0] else prev[1].get_name()
+                log("    role '{}' contested, dropping '{}'".format(role, loser))
+            if prev is None or score > prev[0]:
+                candidates[role] = (score, tex)
+
+        for role, (_, tex) in candidates.items():
             key = tex.get_path_name()
             if key not in exported_textures:
                 exported_textures[key] = export_one(tex, out_dir, "png")
