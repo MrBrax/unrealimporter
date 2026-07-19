@@ -45,6 +45,7 @@ Example command line (PowerShell):
 
 import os
 import json
+import math
 import unreal
 
 
@@ -411,6 +412,44 @@ def instance_world_transforms(comp):
     return out
 
 
+def light_candela(comp, kind, intensity, entry):
+    """Convert a local light's intensity to candela, honouring its ELightUnits.
+
+    UE stores intensity in per-light units (candelas / lumens / legacy unitless / EV).
+    Comparing raw values across units is meaningless - this is why naive brightness
+    mapping made everything blinding. Uses UE's own conversion factor when exposed,
+    else mirrors ULocalLightComponent::GetUnitsConversionFactor.
+    """
+    try:
+        units = comp.get_editor_property("intensity_units")
+    except Exception:
+        return None
+    # repr looks like "<LightUnits.UNITLESS: 0>" - extract the bare enum name.
+    entry["units"] = str(units).split("LightUnits.")[-1].split(":")[0].strip(" >")
+
+    # Solid-angle term: spot cone half-angle, full sphere for point lights.
+    cos_half = -1.0
+    if kind == "spot":
+        cos_half = math.cos(math.radians(entry.get("outer_cone", 44.0)))
+
+    try:
+        factor = unreal.LocalLightComponent.get_units_conversion_factor(
+            units, unreal.LightUnits.CANDELAS, cos_half)
+        return intensity * float(factor)
+    except Exception:
+        pass
+
+    sr = 2.0 * math.pi * (1.0 - cos_half)
+    u = entry["units"]
+    if u == "CANDELAS":
+        return intensity
+    if u == "LUMENS":
+        return intensity / sr if sr > 0 else intensity
+    if u == "EV":
+        return 2.0 ** intensity          # EV100-style: 1 EV step doubles brightness
+    return intensity * 16.0 / 10000.0    # UNITLESS legacy factor from UE source
+
+
 def load_world_partition_actors():
     """Force-load every external actor of a World Partition map. No-op for classic maps."""
     try:
@@ -500,12 +539,17 @@ def collect_scene(actors):
             try:
                 c = comp.get_editor_property("light_color")   # 0-255 bytes
                 entry["color"] = [c.r / 255.0, c.g / 255.0, c.b / 255.0, 1.0]
-                entry["intensity"] = float(comp.get_editor_property("intensity"))
-                if kind != "directional":
-                    entry["radius"] = float(comp.get_editor_property("attenuation_radius"))
+                intensity = float(comp.get_editor_property("intensity"))
+                entry["intensity"] = intensity
                 if kind == "spot":
                     entry["inner_cone"] = float(comp.get_editor_property("inner_cone_angle"))
                     entry["outer_cone"] = float(comp.get_editor_property("outer_cone_angle"))
+                if kind != "directional":
+                    entry["radius"] = float(comp.get_editor_property("attenuation_radius"))
+                    candela = light_candela(comp, kind, intensity, entry)
+                    if candela is not None:
+                        entry["candela"] = candela
+                # directional intensity is lux - passed through raw
             except Exception as e:
                 warn("  light '{}': {}".format(label, e))
             lights.append(entry)

@@ -104,7 +104,16 @@ public class ManifestLight
 	[JsonPropertyName( "rot" )] public float[] Rot { get; set; }
 	[JsonPropertyName( "scale" )] public float[] Scale { get; set; }
 	[JsonPropertyName( "color" )] public float[] Color { get; set; }
+
+	/// <summary>Raw Unreal intensity - unit depends on <see cref="Units"/> (lux for directional).</summary>
 	[JsonPropertyName( "intensity" )] public float? Intensity { get; set; }
+
+	/// <summary>Unreal ELightUnits name: CANDELAS / LUMENS / UNITLESS / EV. Debug info - use Candela.</summary>
+	[JsonPropertyName( "units" )] public string Units { get; set; }
+
+	/// <summary>Luminous intensity in candela, converted from Intensity+Units by the exporter. Point/spot only.</summary>
+	[JsonPropertyName( "candela" )] public float? Candela { get; set; }
+
 	/// <summary>Attenuation radius in centimetres.</summary>
 	[JsonPropertyName( "radius" )] public float? Radius { get; set; }
 	[JsonPropertyName( "inner_cone" )] public float? InnerCone { get; set; }

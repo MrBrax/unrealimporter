@@ -184,13 +184,42 @@ public static class ScenePrefabBuilder
 	}
 
 	/// <summary>
-	/// Unreal light_color is chroma only - fold a soft intensity factor in so bright
-	/// lights read brighter without blowing out (UE candela/lumen values get huge).
+	/// A ~150 cd source (decent interior bulb) maps to HDR magnitude 1.0 - the scale
+	/// hand-placed s&amp;box lights sit at (~0.35-2 in this project's scenes).
+	/// </summary>
+	const float RefCandela = 150f;
+
+	/// <summary>
+	/// Legacy UNITLESS lights aren't physical: UE4-scale authoring puts a strong lamp
+	/// around 1000-5000. Converting them through UE's official unitless-&gt;candela factor
+	/// (16/10000) lands at fractions of a candela and everything goes black, so they get
+	/// their own perceptual reference instead.
+	/// </summary>
+	const float RefUnitless = 800f;
+
+	/// <summary>
+	/// s&amp;box lights carry brightness in LightColor's HDR magnitude. Scale the Unreal
+	/// chroma by intensity: candela for physically-united point/spot lights, a UE4-scale
+	/// heuristic for UNITLESS ones, lux for directional. Raw UE intensities are
+	/// unit-dependent - comparing them without units is what made imports blinding.
+	/// sqrt compresses the huge dynamic range of authored UE values.
 	/// </summary>
 	static string ColorStr( ManifestLight l )
 	{
 		var c = l.Color is { Length: >= 3 } ? l.Color : new float[] { 1, 1, 1 };
-		float brightness = l.Intensity is > 0 ? Math.Clamp( (float)Math.Sqrt( l.Intensity.Value / 8f ), 0.25f, 4f ) : 1f;
+
+		float brightness;
+		if ( l.Type == "directional" && l.Intensity is > 0 )
+			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / 5f ), 0.5f, 3f );   // lux; UE legacy suns sit ~2-15
+		else if ( l.Units?.StartsWith( "UNITLESS" ) == true && l.Intensity is > 0 )
+			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / RefUnitless ), 0.05f, 3f );
+		else if ( l.Candela is > 0 )
+			brightness = Math.Clamp( MathF.Sqrt( l.Candela.Value / RefCandela ), 0.05f, 3f );
+		else if ( l.Intensity is > 0 )
+			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / 8f ), 0.25f, 4f );  // old manifests: unit unknown
+		else
+			brightness = 1f;
+
 		return $"{F( c[0] * brightness )},{F( c[1] * brightness )},{F( c[2] * brightness )},1";
 	}
 
