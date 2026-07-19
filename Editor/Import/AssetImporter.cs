@@ -35,7 +35,8 @@ public static class AssetImporter
 	/// <param name="progressToken"></param>
 	/// <param name="onProgress">(done, total, current asset name) per imported model.</param>
 	/// <param name="generateLods">When false, models get no auto-LOD chain (full detail always).</param>
-	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false, Action<int, int, string> onProgress = null, bool generateLods = true )
+	/// <param name="lightScale">Extra multiplier on converted scene-light brightness (1 = calibrated default).</param>
+	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false, Action<int, int, string> onProgress = null, bool generateLods = true, float lightScale = 1f )
 	{
 		var summary = new ImportSummary { OutputDir = outputRoot };
 

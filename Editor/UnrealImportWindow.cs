@@ -469,6 +469,18 @@ public class UnrealImportWindow : Widget
 	Button exportButton;
 	Checkbox flatCheckbox;
 	Checkbox lodCheckbox;
+	LineEdit lightScaleEdit;
+
+	/// <summary>The light-brightness multiplier from the UI, defensively parsed.</summary>
+	float LightScale()
+	{
+		if ( lightScaleEdit is null )
+			return 1f;
+
+		return float.TryParse( lightScaleEdit.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v ) && v > 0
+			? Math.Clamp( v, 0.01f, 20f )
+			: 1f;
+	}
 
 	public UnrealImportWindow() : this( null ) { }
 
@@ -565,6 +577,24 @@ public class UnrealImportWindow : Widget
 		};
 		lodCheckbox.Toggled = () => EditorCookie.Set( "unreal_import_lods", lodCheckbox.Value );
 		Layout.Add( lodCheckbox );
+
+		// Scene-light brightness: the conversion is calibrated, but UE maps lean on
+		// auto-exposure that s&box doesn't have - taste (and pack) varies, so expose a knob.
+		{
+			var row = Layout.Row();
+			row.Spacing = 8;
+			row.Add( new Label( "Map light brightness ×", this ) );
+			lightScaleEdit = new LineEdit( this )
+			{
+				Text = EditorCookie.Get( "unreal_import_light_scale", 1f ).ToString( System.Globalization.CultureInfo.InvariantCulture ),
+				FixedWidth = 60,
+				ToolTip = "Multiplier on converted map light intensity. 1 = calibrated default; lower for moodier interiors, higher if too dark. Applies on (re)import.",
+			};
+			lightScaleEdit.TextEdited += _ => EditorCookie.Set( "unreal_import_light_scale", LightScale() );
+			row.Add( lightScaleEdit );
+			row.AddStretchCell();
+			Layout.Add( row );
+		}
 
 		statusLabel = new Label( "", this );
 		statusLabel.Color = Theme.TextControl.WithAlpha( 0.6f );
@@ -1032,6 +1062,7 @@ public class UnrealImportWindow : Widget
 			var manifest = ImportManifest.Load( export.ManifestPath );
 			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
+				lightScale: LightScale(),
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n" +
@@ -1088,6 +1119,7 @@ public class UnrealImportWindow : Widget
 			var manifest = ImportManifest.Load( export.ManifestPath );
 			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
+				lightScale: LightScale(),
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n\n" +

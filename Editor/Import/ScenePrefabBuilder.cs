@@ -33,7 +33,7 @@ public static class ScenePrefabBuilder
 	/// mirrored (odd-negative-scale) placements. Returns the prefab's absolute path.
 	/// </summary>
 	public static string Build( ManifestScene scene, IReadOnlyDictionary<string, string> modelsByGamePath, string outputRoot, List<string> warnings,
-		IReadOnlyDictionary<string, string> mirroredByGamePath = null )
+		IReadOnlyDictionary<string, string> mirroredByGamePath = null, float lightScale = 1f )
 	{
 		var children = new JsonArray();
 		var missingMeshes = new HashSet<string>();
@@ -72,7 +72,7 @@ public static class ScenePrefabBuilder
 
 		foreach ( var l in scene.Lights ?? new() )
 		{
-			var node = LightNode( l );
+			var node = LightNode( l, lightScale );
 			if ( node is not null )
 				children.Add( node );
 		}
@@ -181,25 +181,25 @@ public static class ScenePrefabBuilder
 		return node;
 	}
 
-	static JsonObject LightNode( ManifestLight l )
+	static JsonObject LightNode( ManifestLight l, float lightScale )
 	{
 		var (type, props) = l.Type switch
 		{
 			"point" => ("Sandbox.PointLight", new JsonObject
 			{
-				["LightColor"] = ColorStr( l ),
+				["LightColor"] = ColorStr( l, lightScale ),
 				["Radius"] = Round( (l.Radius ?? 1000f) * UeToInch ),
 			}),
 			"spot" => ("Sandbox.SpotLight", new JsonObject
 			{
-				["LightColor"] = ColorStr( l ),
+				["LightColor"] = ColorStr( l, lightScale ),
 				["Radius"] = Round( (l.Radius ?? 1000f) * UeToInch ),
 				["ConeInner"] = Round( l.InnerCone ?? 30f ),
 				["ConeOuter"] = Round( l.OuterCone ?? 45f ),
 			}),
 			"directional" => ("Sandbox.DirectionalLight", new JsonObject
 			{
-				["LightColor"] = ColorStr( l ),
+				["LightColor"] = ColorStr( l, lightScale ),
 				["Shadows"] = true,
 			}),
 			_ => (null, null),
@@ -246,18 +246,22 @@ public static class ScenePrefabBuilder
 	}
 
 	/// <summary>
-	/// A ~150 cd source (decent interior bulb) maps to HDR magnitude 1.0 - the scale
-	/// hand-placed s&amp;box lights sit at (~0.35-2 in this project's scenes).
+	/// A ~1000 cd source (strong ceiling fixture) maps to HDR magnitude 1.0. Calibrated
+	/// visually against the CCA subway terminal: UE relies on auto-exposure to pull
+	/// physically-lit interiors (dozens of overlapping 500-1000 cd lights) down to
+	/// comfortable levels, s&amp;box doesn't - mapping generously blows every surface to
+	/// white. Hand-placed lights in this project sit at ~0.35-2 HDR magnitude.
 	/// </summary>
-	const float RefCandela = 150f;
+	const float RefCandela = 1000f;
 
 	/// <summary>
 	/// Legacy UNITLESS lights aren't physical: UE4-scale authoring puts a strong lamp
 	/// around 1000-5000. Converting them through UE's official unitless-&gt;candela factor
 	/// (16/10000) lands at fractions of a candela and everything goes black, so they get
-	/// their own perceptual reference instead.
+	/// their own perceptual reference instead (calibrated with the same 0.4 factor as
+	/// the candela path).
 	/// </summary>
-	const float RefUnitless = 800f;
+	const float RefUnitless = 5000f;
 
 	/// <summary>
 	/// s&amp;box lights carry brightness in LightColor's HDR magnitude. Scale the Unreal
@@ -266,21 +270,23 @@ public static class ScenePrefabBuilder
 	/// unit-dependent - comparing them without units is what made imports blinding.
 	/// sqrt compresses the huge dynamic range of authored UE values.
 	/// </summary>
-	static string ColorStr( ManifestLight l )
+	static string ColorStr( ManifestLight l, float lightScale )
 	{
 		var c = l.Color is { Length: >= 3 } ? l.Color : new float[] { 1, 1, 1 };
 
 		float brightness;
 		if ( l.Type == "directional" && l.Intensity is > 0 )
-			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / 5f ), 0.5f, 3f );   // lux; UE legacy suns sit ~2-15
+			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / 5f ), 0.5f, 2.5f );   // lux; UE legacy suns sit ~2-15
 		else if ( l.Units?.StartsWith( "UNITLESS" ) == true && l.Intensity is > 0 )
-			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / RefUnitless ), 0.05f, 3f );
+			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / RefUnitless ), 0.05f, 2f );
 		else if ( l.Candela is > 0 )
-			brightness = Math.Clamp( MathF.Sqrt( l.Candela.Value / RefCandela ), 0.05f, 3f );
+			brightness = Math.Clamp( MathF.Sqrt( l.Candela.Value / RefCandela ), 0.05f, 2f );
 		else if ( l.Intensity is > 0 )
 			brightness = Math.Clamp( MathF.Sqrt( l.Intensity.Value / 8f ), 0.25f, 4f );  // old manifests: unit unknown
 		else
 			brightness = 1f;
+
+		brightness = Math.Clamp( brightness * lightScale, 0.02f, 4f );
 
 		return $"{F( c[0] * brightness )},{F( c[1] * brightness )},{F( c[2] * brightness )},1";
 	}
