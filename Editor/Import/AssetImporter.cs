@@ -113,17 +113,41 @@ public static class AssetImporter
 				remaps.Add( (remapKey, vmatContent) );
 			}
 
-			// Write the model.
+			// Write the model, then verify it compiles. Hull-from-render chokes on some
+			// geometry (dense foliage cards -> "Inconsistent hull geometry"), so fall back
+			// to a single hull, then to no collision, until the model compiles.
 			var fbxContent = ToContentPath( assetsDir, fbxDst );
-			var vmdlText = Kv3Writer.VmdlText( fbxContent, asset.ImportScale <= 0 ? 0.3937f : asset.ImportScale, remaps );
 			var vmdlPath = Path.Combine( modelsDir, modelName + ".vmdl" );
-			await File.WriteAllTextAsync( vmdlPath, vmdlText, progressToken );
+			var scale = asset.ImportScale <= 0 ? 0.3937f : asset.ImportScale;
+			string usedHullMode = null;
+
+			foreach ( var hullMode in new[] { "HullPerElement", "SingleHull", null } )
+			{
+				await File.WriteAllTextAsync( vmdlPath, Kv3Writer.VmdlText( fbxContent, scale, remaps, hullMode ), progressToken );
+
+				var vmdlAsset = global::Editor.AssetSystem.RegisterFile( vmdlPath );
+				if ( vmdlAsset is null )
+					break;   // can't verify here - leave the default and let the engine compile later
+
+				if ( vmdlAsset.Compile( full: false ) && !vmdlAsset.IsCompileFailed )
+				{
+					usedHullMode = hullMode;
+					break;
+				}
+
+				if ( hullMode is null )
+					summary.Warnings.Add( $"{asset.Asset}: model failed to compile even without collision - see console." );
+				else
+					summary.Warnings.Add( $"{asset.Asset}: collision '{hullMode}' failed to compile, falling back to {(hullMode == "HullPerElement" ? "SingleHull" : "no collision")}." );
+			}
+
 			summary.Models++;
 
 			if ( !string.IsNullOrEmpty( asset.GamePath ) )
 				modelsByGamePath[asset.GamePath] = ToContentPath( assetsDir, vmdlPath );
-			
-			Log.Info( $"[{manifest.Assets.IndexOf( asset ) + 1}/{manifest.Assets.Count}] Imported {asset.Asset} -> {vmdlPath}" );
+
+			Log.Info( $"[{manifest.Assets.IndexOf( asset ) + 1}/{manifest.Assets.Count}] Imported {asset.Asset} -> {vmdlPath}" +
+				(usedHullMode != "HullPerElement" ? $" (collision: {usedHullMode ?? "none"})" : "") );
 		}
 
 		// Scene mode: turn the level's placements + lights into a prefab next to the models.

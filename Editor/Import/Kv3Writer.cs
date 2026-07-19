@@ -134,8 +134,10 @@ public static class Kv3Writer
 	/// <summary>
 	/// A static model referencing an FBX, with per-slot material remaps, a hull-from-render
 	/// collision shape, and a 5-level auto-LOD chain (matches the flagpole reference).
+	/// hullMode: "HullPerElement" (default), "SingleHull", "HullPerMesh", or null for no
+	/// collision at all - dense foliage geometry can fail hull generation entirely.
 	/// </summary>
-	public static string VmdlText( string fbxContentPath, float importScale, IReadOnlyList<(string slot, string vmat)> remaps )
+	public static string VmdlText( string fbxContentPath, float importScale, IReadOnlyList<(string slot, string vmat)> remaps, string hullMode = "HullPerElement" )
 	{
 		var sb = new StringBuilder();
 		sb.AppendLine( "<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:modeldoc30:version{8c2d7a91-9c42-4bf0-883a-5a3b1762d4f1} -->" );
@@ -170,21 +172,24 @@ public static class Kv3Writer
 		sb.AppendLine( "\t\t\t}," );
 
 		// --- Collision (hull from render mesh) ---
-		sb.AppendLine( "\t\t\t{" );
-		sb.AppendLine( "\t\t\t\t_class = \"PhysicsShapeList\"" );
-		sb.AppendLine( "\t\t\t\tchildren =" );
-		sb.AppendLine( "\t\t\t\t[" );
-		sb.AppendLine( "\t\t\t\t\t{" );
-		sb.AppendLine( "\t\t\t\t\t\t_class = \"PhysicsHullFromRender\"" );
-		sb.AppendLine( "\t\t\t\t\t\tparent_bone = \"\"" );
-		sb.AppendLine( "\t\t\t\t\t\tsurface_prop = \"default\"" );
-		sb.AppendLine( "\t\t\t\t\t\tcollision_tags = \"solid\"" );
-		sb.AppendLine( "\t\t\t\t\t\tfaceMergeAngle = 20.0" );
-		sb.AppendLine( "\t\t\t\t\t\tmaxHullVertices = 32" );
-		sb.AppendLine( "\t\t\t\t\t\thull_mode = \"HullPerElement\"" );
-		sb.AppendLine( "\t\t\t\t\t}," );
-		sb.AppendLine( "\t\t\t\t]" );
-		sb.AppendLine( "\t\t\t}," );
+		if ( hullMode is not null )
+		{
+			sb.AppendLine( "\t\t\t{" );
+			sb.AppendLine( "\t\t\t\t_class = \"PhysicsShapeList\"" );
+			sb.AppendLine( "\t\t\t\tchildren =" );
+			sb.AppendLine( "\t\t\t\t[" );
+			sb.AppendLine( "\t\t\t\t\t{" );
+			sb.AppendLine( "\t\t\t\t\t\t_class = \"PhysicsHullFromRender\"" );
+			sb.AppendLine( "\t\t\t\t\t\tparent_bone = \"\"" );
+			sb.AppendLine( "\t\t\t\t\t\tsurface_prop = \"default\"" );
+			sb.AppendLine( "\t\t\t\t\t\tcollision_tags = \"solid\"" );
+			sb.AppendLine( "\t\t\t\t\t\tfaceMergeAngle = 20.0" );
+			sb.AppendLine( "\t\t\t\t\t\tmaxHullVertices = 32" );
+			sb.AppendLine( $"\t\t\t\t\t\thull_mode = \"{hullMode}\"" );
+			sb.AppendLine( "\t\t\t\t\t}," );
+			sb.AppendLine( "\t\t\t\t]" );
+			sb.AppendLine( "\t\t\t}," );
+		}
 
 		// --- Render mesh (FBX) ---
 		sb.AppendLine( "\t\t\t{" );
