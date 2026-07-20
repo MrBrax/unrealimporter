@@ -22,31 +22,127 @@ public class ImportSummary
 	public string PrefabPath;
 }
 
+/// <summary>How generated assets are laid out on disk.</summary>
+public enum ImportLayout
+{
+	/// <summary>&lt;output&gt;/models, /materials, /textures.</summary>
+	Grouped,
+
+	/// <summary>Everything directly in &lt;output&gt;.</summary>
+	Flat,
+
+	/// <summary>
+	/// Classic Source style: Assets/models/&lt;sub&gt; for fbx+vmdl, Assets/materials/&lt;sub&gt; for
+	/// vmat+textures, Assets/prefabs/&lt;sub&gt; for map prefabs. Ignores the picked output folder.
+	/// </summary>
+	ClassicSource,
+}
+
+/// <summary>Where each kind of generated file goes.</summary>
+public class ImportPaths
+{
+	public string ModelsDir;
+	public string MaterialsDir;
+	public string TexturesDir;
+	public string PrefabDir;
+
+	/// <summary>What to show the user as "where it went".</summary>
+	public string Display;
+}
+
 /// <summary>
 /// Consumes a staging folder (FBX + PNG + manifest.json from the headless export) and writes
 /// sbox assets (.fbx + .vmat + .vmdl) into the project, ready for the engine to compile.
 /// </summary>
 public static class AssetImporter
 {
+	/// <summary>
+	/// Resolve the destination folders for a layout. Classic Source hangs off the Assets root
+	/// (type first, then subfolder) rather than off the picked output folder.
+	/// </summary>
+	public static ImportPaths ResolvePaths( string outputRoot, string assetsDir, ImportLayout layout, string subfolder )
+	{
+		switch ( layout )
+		{
+			case ImportLayout.Flat:
+				return new ImportPaths
+				{
+					ModelsDir = outputRoot,
+					MaterialsDir = outputRoot,
+					TexturesDir = outputRoot,
+					PrefabDir = outputRoot,
+					Display = outputRoot,
+				};
+
+			case ImportLayout.ClassicSource:
+			{
+				// Empty subfolder is legal - assets land straight in Assets/models, Assets/materials.
+				var sub = SanitizeSubfolder( subfolder );
+				string Under( string type ) => string.IsNullOrEmpty( sub )
+					? Path.Combine( assetsDir, type )
+					: Path.Combine( assetsDir, type, sub );
+
+				var models = Under( "models" );
+				var materials = Under( "materials" );
+
+				return new ImportPaths
+				{
+					ModelsDir = models,
+					// Textures live beside the vmats that reference them.
+					MaterialsDir = materials,
+					TexturesDir = materials,
+					PrefabDir = Under( "prefabs" ),
+					Display = $"{models}\n{materials}",
+				};
+			}
+
+			default:
+				return new ImportPaths
+				{
+					ModelsDir = Path.Combine( outputRoot, "models" ),
+					MaterialsDir = Path.Combine( outputRoot, "materials" ),
+					TexturesDir = Path.Combine( outputRoot, "textures" ),
+					PrefabDir = outputRoot,
+					Display = outputRoot,
+				};
+		}
+	}
+
+	/// <summary>Trim a user-typed subfolder to a safe relative path ("Props/Barrels" stays nested).</summary>
+	static string SanitizeSubfolder( string subfolder )
+	{
+		if ( string.IsNullOrWhiteSpace( subfolder ) )
+			return "";
+
+		var parts = subfolder.Split( new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries )
+			.Select( p => p.Trim() )
+			.Where( p => p.Length > 0 && p != "." && p != ".." )
+			.Select( Sanitize );
+
+		return string.Join( Path.DirectorySeparatorChar, parts );
+	}
+
 	/// <param name="manifest"></param>
 	/// <param name="stagingDir"></param>
 	/// <param name="outputRoot"></param>
-	/// <param name="flat">When true, everything goes directly in outputRoot instead of models/materials/textures subfolders.</param>
 	/// <param name="progressToken"></param>
+	/// <param name="layout">How the generated files are foldered - see <see cref="ImportLayout"/>.</param>
+	/// <param name="subfolder">Subfolder under Assets/models + Assets/materials, ClassicSource layout only.</param>
 	/// <param name="onProgress">(done, total, current asset name) per imported model.</param>
 	/// <param name="generateLods">When false, models get no auto-LOD chain (full detail always).</param>
 	/// <param name="lightScale">Extra multiplier on converted scene-light brightness (1 = calibrated default).</param>
-	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, bool flat = false, Action<int, int, string> onProgress = null, bool generateLods = true, float lightScale = 1f )
+	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, ImportLayout layout = ImportLayout.Grouped, string subfolder = null, Action<int, int, string> onProgress = null, bool generateLods = true, float lightScale = 1f )
 	{
-		var summary = new ImportSummary { OutputDir = outputRoot };
-
 		var assetsDir = FindAssetsDir( outputRoot ) ?? Sandbox.Project.Current?.GetAssetsPath();
 		if ( string.IsNullOrEmpty( assetsDir ) )
 			throw new Exception( "Could not resolve the project's Assets folder. Pick an output folder inside Assets/." );
 
-		var modelsDir = flat ? outputRoot : Path.Combine( outputRoot, "models" );
-		var materialsDir = flat ? outputRoot : Path.Combine( outputRoot, "materials" );
-		var texturesDir = flat ? outputRoot : Path.Combine( outputRoot, "textures" );
+		var paths = ResolvePaths( outputRoot, assetsDir, layout, subfolder );
+		var summary = new ImportSummary { OutputDir = paths.Display };
+
+		var modelsDir = paths.ModelsDir;
+		var materialsDir = paths.MaterialsDir;
+		var texturesDir = paths.TexturesDir;
 		Directory.CreateDirectory( modelsDir );
 		Directory.CreateDirectory( materialsDir );
 		Directory.CreateDirectory( texturesDir );
@@ -208,7 +304,8 @@ public static class AssetImporter
 			if ( manifest.Scene.Warnings is { Count: > 0 } )
 				summary.Warnings.AddRange( manifest.Scene.Warnings );
 
-			summary.PrefabPath = ScenePrefabBuilder.Build( manifest.Scene, modelsByGamePath, outputRoot, summary.Warnings, mirroredByGamePath );
+			Directory.CreateDirectory( paths.PrefabDir );
+			summary.PrefabPath = ScenePrefabBuilder.Build( manifest.Scene, modelsByGamePath, paths.PrefabDir, summary.Warnings, mirroredByGamePath );
 			summary.Placements = manifest.Scene.Placements?.Count ?? 0;
 		}
 
@@ -356,6 +453,9 @@ public static class AssetImporter
 
 	static string FindAssetsDir( string path )
 	{
+		if ( string.IsNullOrEmpty( path ) )
+			return null;
+
 		var d = new DirectoryInfo( path );
 		while ( d != null )
 		{

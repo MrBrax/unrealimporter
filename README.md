@@ -19,9 +19,21 @@ inside the editor.
 1. In the s&box editor, open **Tools → Unreal Importer**.
 2. Pick the Unreal project folder (the one containing the `.uproject`).
 3. Tick the static meshes you want.
-4. Choose an output folder (defaults to `Assets/unrealimport`) and export.
+4. Choose an output folder (defaults to `Assets/unrealimport`), pick a layout, and export.
 
 The editor may be unresponsive while Unreal runs.
+
+### Output layouts
+
+| Layout | FBX + vmdl | vmat + textures | Map prefab |
+| --- | --- | --- | --- |
+| **Grouped** (default) | `<output>/models` | `<output>/materials`, `<output>/textures` | `<output>` |
+| **Flat** | `<output>` | `<output>` | `<output>` |
+| **Classic Source** | `Assets/models/<sub>` | `Assets/materials/<sub>` | `Assets/prefabs/<sub>` |
+
+Classic Source ignores the picked output folder and hangs off the project's `Assets` root
+instead, type-first like a Source game. Its subfolder is free text (`Props/Barrels` nests);
+leave it empty to write straight into `Assets/models` and `Assets/materials`.
 
 ## How it works
 

@@ -467,9 +467,18 @@ public class UnrealImportWindow : Widget
 	LineEdit searchEdit;
 	ImportTreeView tree;
 	Button exportButton;
-	Checkbox flatCheckbox;
+	ComboBox layoutCombo;
+	LineEdit subfolderEdit;
+	Label subfolderLabel;
 	Checkbox lodCheckbox;
 	LineEdit lightScaleEdit;
+
+	/// <summary>Combo item order - the layout row adds items in exactly this order.</summary>
+	static readonly ImportLayout[] LayoutOrder = { ImportLayout.Grouped, ImportLayout.Flat, ImportLayout.ClassicSource };
+
+	ImportLayout SelectedLayout => layoutCombo is null ? ImportLayout.Grouped : LayoutOrder[Math.Clamp( layoutCombo.CurrentIndex, 0, LayoutOrder.Length - 1 )];
+
+	string Subfolder() => subfolderEdit?.Text ?? "";
 
 	/// <summary>The light-brightness multiplier from the UI, defensively parsed.</summary>
 	float LightScale()
@@ -568,8 +577,50 @@ public class UnrealImportWindow : Widget
 			Layout.Add( row );
 		}
 
-		flatCheckbox = new Checkbox( "Flat output (no models/materials/textures subfolders)", this ) { Value = false };
-		Layout.Add( flatCheckbox );
+		// Output layout row
+		{
+			var row = Layout.Row();
+			row.Spacing = 8;
+			row.Add( new Label( "Layout", this ) );
+
+			layoutCombo = new ComboBox( this ) { MinimumWidth = 200 };
+			layoutCombo.AddItem( "Grouped", icon: "folder",
+				description: "<output>/models, /materials, /textures" );
+			layoutCombo.AddItem( "Flat", icon: "folder_open",
+				description: "Everything directly in the output folder" );
+			layoutCombo.AddItem( "Classic Source", icon: "account_tree",
+				description: "Assets/models/<sub> for fbx+vmdl, Assets/materials/<sub> for vmat+textures" );
+
+			var savedLayout = EditorCookie.Get( "unreal_import_layout", 0 );
+			layoutCombo.CurrentIndex = Math.Clamp( savedLayout, 0, LayoutOrder.Length - 1 );
+			row.Add( layoutCombo );
+
+			subfolderLabel = new Label( "Subfolder", this );
+			row.Add( subfolderLabel );
+
+			subfolderEdit = new LineEdit( this )
+			{
+				Text = EditorCookie.Get( "unreal_import_subfolder", "unrealimport" ),
+				PlaceholderText = "(none)",
+				ToolTip = "Subfolder under Assets/models and Assets/materials. Leave empty to write straight into them.",
+			};
+			subfolderEdit.TextEdited += t =>
+			{
+				EditorCookie.Set( "unreal_import_subfolder", t ?? "" );
+				if ( outputLabel is not null )
+					outputLabel.Text = OutputDisplay();
+			};
+			row.Add( subfolderEdit, 1 );
+
+			layoutCombo.ItemChanged += () =>
+			{
+				EditorCookie.Set( "unreal_import_layout", layoutCombo.CurrentIndex );
+				UpdateLayoutRow();
+			};
+
+			Layout.Add( row );
+			UpdateLayoutRow();
+		}
 
 		lodCheckbox = new Checkbox( "Generate LODs (5-level auto chain; untick for full detail at every distance)", this )
 		{
@@ -629,7 +680,36 @@ public class UnrealImportWindow : Widget
 		}
 	}
 
-	string OutputDisplay() => string.IsNullOrEmpty( outputFolder ) ? "No output folder" : $"Output: {outputFolder}";
+	string OutputDisplay()
+	{
+		// Classic Source ignores the picked folder entirely - it writes off the Assets root.
+		if ( SelectedLayout == ImportLayout.ClassicSource )
+		{
+			var assets = Sandbox.Project.Current?.GetAssetsPath();
+			if ( string.IsNullOrEmpty( assets ) )
+				return "Output: Assets/models + Assets/materials";
+
+			var paths = AssetImporter.ResolvePaths( outputFolder, assets, ImportLayout.ClassicSource, Subfolder() );
+			return $"Output: {paths.ModelsDir}  +  {paths.MaterialsDir}";
+		}
+
+		return string.IsNullOrEmpty( outputFolder ) ? "No output folder" : $"Output: {outputFolder}";
+	}
+
+	/// <summary>The subfolder field only means anything in Classic Source; grey it out elsewhere.</summary>
+	void UpdateLayoutRow()
+	{
+		var classic = SelectedLayout == ImportLayout.ClassicSource;
+
+		if ( subfolderEdit is not null )
+			subfolderEdit.Enabled = classic;
+		if ( subfolderLabel is not null )
+			subfolderLabel.Enabled = classic;
+		if ( outputLabel is not null )
+			outputLabel.Text = OutputDisplay();
+
+		UpdateExportEnabled();
+	}
 
 	void PickProject()
 	{
@@ -979,8 +1059,12 @@ public class UnrealImportWindow : Widget
 
 	void UpdateExportEnabled()
 	{
-		if ( exportButton is not null )
-			exportButton.Enabled = entries.Count > 0 && !string.IsNullOrEmpty( outputFolder ) && !string.IsNullOrEmpty( uprojectPath );
+		if ( exportButton is null )
+			return;
+
+		// Classic Source writes off the Assets root, so it doesn't need a picked output folder.
+		var haveOutput = SelectedLayout == ImportLayout.ClassicSource || !string.IsNullOrEmpty( outputFolder );
+		exportButton.Enabled = entries.Count > 0 && haveOutput && !string.IsNullOrEmpty( uprojectPath );
 	}
 
 	/// <summary>Push a live export/import event into the progress toast + status line.</summary>
@@ -1030,7 +1114,7 @@ public class UnrealImportWindow : Widget
 
 	async Task RunImportMap( MapEntry map )
 	{
-		if ( string.IsNullOrEmpty( outputFolder ) )
+		if ( string.IsNullOrEmpty( outputFolder ) && SelectedLayout != ImportLayout.ClassicSource )
 		{
 			EditorUtility.DisplayDialog( "No output folder", "Pick an output folder (inside Assets/) first." );
 			return;
@@ -1060,7 +1144,7 @@ public class UnrealImportWindow : Widget
 
 			progress.Title = $"Importing map {map.Display}";
 			var manifest = ImportManifest.Load( export.ManifestPath );
-			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
+			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, SelectedLayout, Subfolder(),
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				lightScale: LightScale(),
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
@@ -1117,7 +1201,7 @@ public class UnrealImportWindow : Widget
 
 			progress.Title = "Importing into s&box";
 			var manifest = ImportManifest.Load( export.ManifestPath );
-			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, flatCheckbox is not null && flatCheckbox.Value,
+			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, SelectedLayout, Subfolder(),
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				lightScale: LightScale(),
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
