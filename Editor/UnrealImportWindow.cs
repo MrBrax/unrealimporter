@@ -498,6 +498,8 @@ public class UnrealImportWindow : Widget
 	Checkbox lodCheckbox;
 	LineEdit lightScaleEdit;
 	ComboBox materialOutputCombo;
+	ComboBox perAssetFolderCombo;
+	Label perAssetFolderLabel;
 
 	/// <summary>Combo item order - the layout row adds items in exactly this order.</summary>
 	static readonly ImportLayout[] LayoutOrder = { ImportLayout.Grouped, ImportLayout.Flat, ImportLayout.ClassicSource, ImportLayout.PerAsset };
@@ -510,6 +512,9 @@ public class UnrealImportWindow : Widget
 	MaterialOutput SelectedMaterialOutput => materialOutputCombo is null
 		? MaterialOutput.Material
 		: MaterialOutputOrder[Math.Clamp( materialOutputCombo.CurrentIndex, 0, MaterialOutputOrder.Length - 1 )];
+
+	/// <summary>Per-asset folder-name depth: the combo index IS the depth (0 = asset's own name).</summary>
+	int PerAssetFolderDepth => perAssetFolderCombo?.CurrentIndex ?? 0;
 
 	string Subfolder() => subfolderEdit?.Text ?? "";
 
@@ -716,6 +721,32 @@ public class UnrealImportWindow : Widget
 				ToolTip = "A model's material slots can't reference a terrain or decal resource, so this only applies to materials imported on their own.",
 			}, xSpan: 3 );
 
+			// Row 4: Per Asset only - which folder to name each asset's subfolder after.
+			// Fab/Megascans MIs are named like "mi_sjfnbeaa"; the readable name is a couple
+			// folders up (.../Fine_American_Road_sjfnbeaa/Medium/MI_sjfnbeaa).
+			perAssetFolderLabel = new Label( "Folder name", this ) { FixedWidth = LabelWidth };
+			grid.AddCell( 0, 4, perAssetFolderLabel );
+
+			perAssetFolderCombo = new ComboBox( this ) { MinimumWidth = 180 };
+			perAssetFolderCombo.AddItem( "Asset name", icon: "description",
+				description: "Name each folder after the asset itself (e.g. mi_sjfnbeaa)" );
+			perAssetFolderCombo.AddItem( "1 folder up", icon: "north",
+				description: "Name it after the asset's parent folder" );
+			perAssetFolderCombo.AddItem( "2 folders up", icon: "north",
+				description: "Grandparent folder - the readable pack name for Fab/Megascans" );
+			perAssetFolderCombo.AddItem( "3 folders up", icon: "north",
+				description: "Great-grandparent folder" );
+
+			perAssetFolderCombo.CurrentIndex = Math.Clamp( EditorCookie.Get( "unreal_import_perasset_depth", 0 ), 0, 3 );
+			perAssetFolderCombo.ItemChanged += () => EditorCookie.Set( "unreal_import_perasset_depth", perAssetFolderCombo.CurrentIndex );
+			grid.AddCell( 1, 4, perAssetFolderCombo.StyleInput() );
+
+			grid.AddCell( 2, 4, new Label( "Per Asset layout only", this )
+			{
+				Color = Theme.TextControl.WithAlpha( 0.5f ),
+				ToolTip = "Which folder each asset's subfolder is named after, when using the Per Asset layout.",
+			}, xSpan: 3 );
+
 			// Only the field columns absorb extra width; the label columns stay tight.
 			grid.SetColumnStretch( 0, 3, 0, 2, 0 );
 
@@ -785,11 +816,19 @@ public class UnrealImportWindow : Widget
 	void UpdateLayoutRow()
 	{
 		var classic = SelectedLayout == ImportLayout.ClassicSource;
+		var perAsset = SelectedLayout == ImportLayout.PerAsset;
 
 		if ( subfolderEdit is not null )
 			subfolderEdit.Enabled = classic;
 		if ( subfolderLabel is not null )
 			subfolderLabel.Enabled = classic;
+
+		// The folder-name depth only matters when each asset gets its own folder.
+		if ( perAssetFolderCombo is not null )
+			perAssetFolderCombo.Enabled = perAsset;
+		if ( perAssetFolderLabel is not null )
+			perAssetFolderLabel.Enabled = perAsset;
+
 		if ( outputLabel is not null )
 			outputLabel.Text = OutputDisplay();
 
@@ -1283,6 +1322,7 @@ public class UnrealImportWindow : Widget
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				lightScale: LightScale(),
 				materialOutput: SelectedMaterialOutput,
+				perAssetFolderDepth: PerAssetFolderDepth,
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n" +
@@ -1347,6 +1387,7 @@ public class UnrealImportWindow : Widget
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				lightScale: LightScale(),
 				materialOutput: SelectedMaterialOutput,
+				perAssetFolderDepth: PerAssetFolderDepth,
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n\n" +

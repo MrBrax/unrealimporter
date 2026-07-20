@@ -166,7 +166,12 @@ public static class AssetImporter
 	/// <param name="generateLods">When false, models get no auto-LOD chain (full detail always).</param>
 	/// <param name="lightScale">Extra multiplier on converted scene-light brightness (1 = calibrated default).</param>
 	/// <param name="materialOutput">What standalone materials become - vmat, tmat or decal. Mesh slots are always vmat.</param>
-	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, ImportLayout layout = ImportLayout.Grouped, string subfolder = null, Action<int, int, string> onProgress = null, bool generateLods = true, float lightScale = 1f, MaterialOutput materialOutput = MaterialOutput.Material )
+	/// <param name="perAssetFolderDepth">
+	/// PerAsset layout only: how many folders up the /Game path to name each asset's folder after.
+	/// 0 = the asset's own name (e.g. mi_sjfnbeaa). Fab/Megascans bury the real name a couple of
+	/// folders up (.../Fine_American_Road_sjfnbeaa/Medium/MI_sjfnbeaa), so 2 gives a readable folder.
+	/// </param>
+	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, ImportLayout layout = ImportLayout.Grouped, string subfolder = null, Action<int, int, string> onProgress = null, bool generateLods = true, float lightScale = 1f, MaterialOutput materialOutput = MaterialOutput.Material, int perAssetFolderDepth = 0 )
 	{
 		var assetsDir = FindAssetsDir( outputRoot ) ?? Sandbox.Project.Current?.GetAssetsPath();
 		if ( string.IsNullOrEmpty( assetsDir ) )
@@ -180,13 +185,15 @@ public static class AssetImporter
 		Directory.CreateDirectory( paths.TexturesDir );
 
 		// PerAsset puts every asset in its own self-contained folder; every other layout
-		// shares one set of directories for the whole import.
-		(string models, string materials, string textures) DirsFor( string assetName )
+		// shares one set of directories for the whole import. The folder is named after a
+		// parent of the /Game path (perAssetFolderDepth up) when the asset's own name is
+		// unhelpful - Fab MIs are named like "mi_sjfnbeaa".
+		(string models, string materials, string textures) DirsFor( string ownName, string gamePath )
 		{
 			if ( layout != ImportLayout.PerAsset )
 				return (paths.ModelsDir, paths.MaterialsDir, paths.TexturesDir);
 
-			var dir = Path.Combine( paths.ModelsDir, assetName );
+			var dir = Path.Combine( paths.ModelsDir, PerAssetFolder( gamePath, ownName, perAssetFolderDepth ) );
 			Directory.CreateDirectory( dir );
 			return (dir, dir, dir);
 		}
@@ -231,7 +238,7 @@ public static class AssetImporter
 			}
 
 			var modelName = Sanitize( asset.Asset );
-			var (modelsDir, materialsDir, texturesDir) = DirsFor( modelName );
+			var (modelsDir, materialsDir, texturesDir) = DirsFor( modelName, asset.GamePath );
 			var fbxDst = Path.Combine( modelsDir, modelName + ".fbx" );
 			File.Copy( fbxSrc, fbxDst, overwrite: true );
 
@@ -326,8 +333,8 @@ public static class AssetImporter
 			onProgress?.Invoke( manifest.Assets.Count + manifest.Materials.IndexOf( mat ) + 1, totalAssets, name );
 
 			var baseName = MaterialBaseName( mat );
-			// A standalone material is its own asset, so PerAsset folders it under its own name.
-			var (_, matDir, texDir) = DirsFor( baseName );
+			// A standalone material is its own asset, so PerAsset gives it its own folder.
+			var (_, matDir, texDir) = DirsFor( baseName, mat.GamePath );
 
 			string written;
 			if ( materialOutput == MaterialOutput.Terrain )
@@ -668,6 +675,33 @@ public static class AssetImporter
 		}
 
 		return Sanitize( mat.Slot ?? "material" );
+	}
+
+	/// <summary>
+	/// Folder name for an asset under the PerAsset layout: its own sanitized name at depth 0,
+	/// or an ancestor of its /Game path further up. Fab MIs carry meaningless names
+	/// (mi_sjfnbeaa) while the human-readable pack name sits a couple of folders above
+	/// (.../Fine_American_Road_sjfnbeaa/Medium/MI_sjfnbeaa), so depth 2 names the folder for it.
+	/// Never climbs into the "/Game" mount root, and falls back to the own name if the path
+	/// is too shallow for the requested depth.
+	/// </summary>
+	static string PerAssetFolder( string gamePath, string ownName, int depth )
+	{
+		if ( depth <= 0 || string.IsNullOrEmpty( gamePath ) )
+			return Sanitize( ownName );
+
+		var parts = gamePath.Split( '/', StringSplitOptions.RemoveEmptyEntries );
+
+		// Last segment is the asset itself; walk `depth` folders up from it.
+		int idx = parts.Length - 1 - depth;
+
+		// parts[0] is normally the "Game" mount - don't name a folder after it.
+		int floor = parts.Length > 1 && parts[0].Equals( "Game", StringComparison.OrdinalIgnoreCase ) ? 1 : 0;
+
+		if ( idx < floor || idx >= parts.Length - 1 )
+			return Sanitize( ownName );
+
+		return Sanitize( parts[idx] );
 	}
 
 	/// <summary>Lowercase; non [a-z0-9_] -> '_'. Guarantees no dots in generated filenames.</summary>

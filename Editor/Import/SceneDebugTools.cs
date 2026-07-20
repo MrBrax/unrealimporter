@@ -17,8 +17,9 @@ public static class SceneDebugTools
 	/// <param name="outputFolder">Output folder inside the project's Assets/.</param>
 	/// <param name="layout">Grouped (default), Flat, ClassicSource or PerAsset.</param>
 	/// <param name="materialOutput">Material (default), Terrain or Decal.</param>
+	/// <param name="perAssetFolderDepth">PerAsset layout: folders up the /Game path to name each folder after (0 = own name).</param>
 	[McpTool( "unreal_scene_import_test" )]
-	public static async Task<string> SceneImportTest( string stagingDir, string outputFolder, string layout = null, string materialOutput = null )
+	public static async Task<string> SceneImportTest( string stagingDir, string outputFolder, string layout = null, string materialOutput = null, int perAssetFolderDepth = 0 )
 	{
 		var manifestPath = Path.Combine( stagingDir, "manifest.json" );
 		if ( !File.Exists( manifestPath ) )
@@ -30,7 +31,7 @@ public static class SceneDebugTools
 			return $"unknown material output '{materialOutput}'";
 
 		var manifest = ImportManifest.Load( manifestPath );
-		var summary = await AssetImporter.Import( manifest, stagingDir, outputFolder, CancellationToken.None, importLayout, materialOutput: matOutput );
+		var summary = await AssetImporter.Import( manifest, stagingDir, outputFolder, CancellationToken.None, importLayout, materialOutput: matOutput, perAssetFolderDepth: perAssetFolderDepth );
 
 		var result = $"models={summary.Models} materials={summary.Materials} textures={summary.Textures} " +
 			$"placements={summary.Placements} prefab={summary.PrefabPath ?? "(none)"}";

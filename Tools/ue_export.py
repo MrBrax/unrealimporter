@@ -73,8 +73,10 @@ ROLE_SUFFIXES = {
     "ao": ["_ao", "_occlusion"],
     "emissive": ["_emissive", "_emis", "_emm", "_glow", "_e"],
     "opacity": ["_opacity", "_mask", "_alpha"],
-    # No s&box counterpart in complex.shader - recorded so the user knows it existed.
-    "height": ["_displacement", "_disp", "_height"],
+    # Used by terrain + decal resources (complex.shader has no slot). "_h" is the common
+    # Megascans/Fab suffix; it's single-letter but so are _d/_n/_r/_m here, and the trailing
+    # underscore keeps it from matching words like "rough" or "cloth".
+    "height": ["_displacement", "_disp", "_height", "_h"],
 }
 
 # Channel layout of a packed ORM-family texture, as (role of R, G, B). Megascans ships
@@ -163,6 +165,8 @@ def classify_param_name(pname):
         return "metal"
     if "ambientocclusion" in p or "occlusion" in p or p == "ao":
         return "ao"
+    if "height" in p or "displacement" in p or "parallax" in p:
+        return "height"
     if "emissive" in p or "emission" in p:
         return "emissive"
     if "opacity" in p or "alpha" in p:
