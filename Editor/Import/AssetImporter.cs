@@ -45,6 +45,22 @@ public enum ImportLayout
 	ClassicSource,
 }
 
+/// <summary>
+/// What a material picked on its own turns into. Materials on a MESH are always .vmat -
+/// a model's material slots can't reference a terrain or decal resource.
+/// </summary>
+public enum MaterialOutput
+{
+	/// <summary>A complex.shader .vmat (the default).</summary>
+	Material,
+
+	/// <summary>A .tmat Terrain Material - for tiling ground surfaces.</summary>
+	Terrain,
+
+	/// <summary>A .decal Decal Definition - projected decals.</summary>
+	Decal,
+}
+
 /// <summary>Where each kind of generated file goes.</summary>
 public class ImportPaths
 {
@@ -149,7 +165,8 @@ public static class AssetImporter
 	/// <param name="onProgress">(done, total, current asset name) per imported model.</param>
 	/// <param name="generateLods">When false, models get no auto-LOD chain (full detail always).</param>
 	/// <param name="lightScale">Extra multiplier on converted scene-light brightness (1 = calibrated default).</param>
-	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, ImportLayout layout = ImportLayout.Grouped, string subfolder = null, Action<int, int, string> onProgress = null, bool generateLods = true, float lightScale = 1f )
+	/// <param name="materialOutput">What standalone materials become - vmat, tmat or decal. Mesh slots are always vmat.</param>
+	public static async Task<ImportSummary> Import( ImportManifest manifest, string stagingDir, string outputRoot, CancellationToken progressToken, ImportLayout layout = ImportLayout.Grouped, string subfolder = null, Action<int, int, string> onProgress = null, bool generateLods = true, float lightScale = 1f, MaterialOutput materialOutput = MaterialOutput.Material )
 	{
 		var assetsDir = FindAssetsDir( outputRoot ) ?? Sandbox.Project.Current?.GetAssetsPath();
 		if ( string.IsNullOrEmpty( assetsDir ) )
@@ -294,6 +311,11 @@ public static class AssetImporter
 				(usedHullMode != "HullPerElement" ? $" (collision: {usedHullMode ?? "none"})" : "") );
 		}
 
+		// A model's material slots have to be vmats, so a terrain/decal choice only applies to
+		// the standalone materials - say so rather than leaving the user to wonder.
+		if ( materialOutput != MaterialOutput.Material && manifest.Assets.Count > 0 )
+			summary.Warnings.Add( $"Material output '{materialOutput}' applies to materials imported on their own; the {manifest.Assets.Count} mesh(es) still got .vmat materials." );
+
 		// Materials picked on their own: no mesh, just a vmat + its textures. Surface packs
 		// (Megascans Surfaces) consist of nothing else.
 		foreach ( var mat in manifest.Materials ?? new() )
@@ -306,13 +328,28 @@ public static class AssetImporter
 			var baseName = MaterialBaseName( mat );
 			// A standalone material is its own asset, so PerAsset folders it under its own name.
 			var (_, matDir, texDir) = DirsFor( baseName );
-			var vmatContent = await WriteVmat( mat, baseName, stagingDir, assetsDir, matDir, texDir, writtenVmats, summary, progressToken );
 
-			// Nothing compiles this one for us (a model would have pulled it in), so register
-			// it explicitly - otherwise it doesn't show in the asset browser until a rescan.
-			global::Editor.AssetSystem.RegisterFile( Path.Combine( matDir, baseName + ".vmat" ) );
+			string written;
+			if ( materialOutput == MaterialOutput.Terrain )
+			{
+				written = WriteTerrainMaterial( mat, baseName, stagingDir, assetsDir, matDir, texDir, summary );
+			}
+			else if ( materialOutput == MaterialOutput.Decal )
+			{
+				written = WriteDecal( mat, baseName, stagingDir, assetsDir, matDir, texDir, summary );
+			}
+			else
+			{
+				written = await WriteVmat( mat, baseName, stagingDir, assetsDir, matDir, texDir, writtenVmats, summary, progressToken );
 
-			Log.Info( $"Imported material {name} -> {vmatContent}" );
+				// A vmat is just a file we wrote - nothing compiles it for us here (a model
+				// would have pulled it in), so register it or it won't show in the asset
+				// browser until a rescan. The GameResource paths are saved through the asset
+				// system already, which registers and compiles them.
+				global::Editor.AssetSystem.RegisterFile( Path.Combine( matDir, baseName + ".vmat" ) );
+			}
+
+			Log.Info( $"Imported material {name} -> {written}" );
 		}
 
 		// Scene mode: turn the level's placements + lights into a prefab next to the models.
@@ -379,6 +416,75 @@ public static class AssetImporter
 		var content = ToContentPath( assetsDir, vmatPath );
 		writtenVmats[cacheKey] = content;
 		return content;
+	}
+
+	/// <summary>
+	/// Write a .tmat Terrain Material. Terrain wants separate grayscale maps plus the height
+	/// map (which the vmat path has no slot for), and carries metalness as a scalar - so a
+	/// metallic texture has nowhere to go and is reported rather than silently dropped.
+	/// </summary>
+	static string WriteTerrainMaterial( ManifestMaterial mat, string baseName, string stagingDir, string assetsDir,
+		string materialsDir, string texturesDir, ImportSummary summary )
+	{
+		var tex = TextureProcessor.Process( mat, stagingDir, texturesDir, baseName, AlphaRole.Ignore, packRmo: false, wantHeight: true );
+		summary.Textures += CountTextures( tex );
+
+		var path = Path.Combine( materialsDir, baseName + ".tmat" );
+		var asset = GameResourceWriter.CreateTerrainMaterial( path,
+			albedo: TexContent( assetsDir, texturesDir, tex.Color ),
+			roughness: TexContent( assetsDir, texturesDir, tex.Roughness ),
+			normal: TexContent( assetsDir, texturesDir, tex.Normal ),
+			height: TexContent( assetsDir, texturesDir, tex.Height ),
+			ao: TexContent( assetsDir, texturesDir, tex.Ao ) );
+
+		if ( asset is null )
+		{
+			summary.Warnings.Add( $"{baseName}: failed to create the terrain material - see console." );
+			return ToContentPath( assetsDir, path );
+		}
+
+		summary.Materials++;
+
+		if ( tex.Metallic is not null )
+			summary.Warnings.Add( $"{baseName}: terrain materials carry metalness as a single value, not a texture - the metallic map was not used." );
+		if ( tex.Height is null )
+			summary.Warnings.Add( $"{baseName}: no height/displacement map found - terrain height blending will be flat." );
+
+		return asset.Path;
+	}
+
+	/// <summary>
+	/// Write a .decal Decal Definition. Decals take ONE packed rough/metal/occlusion map
+	/// rather than three, and are masked by the colour texture's alpha - so an opaque source
+	/// material makes a decal that covers its whole quad.
+	/// </summary>
+	static string WriteDecal( ManifestMaterial mat, string baseName, string stagingDir, string assetsDir,
+		string materialsDir, string texturesDir, ImportSummary summary )
+	{
+		// Keep the albedo's alpha as the decal mask whatever the Unreal blend mode says.
+		var tex = TextureProcessor.Process( mat, stagingDir, texturesDir, baseName, AlphaRole.Ignore, packRmo: true, wantHeight: true );
+		summary.Textures += CountTextures( tex );
+
+		var path = Path.Combine( materialsDir, baseName + ".decal" );
+		var asset = GameResourceWriter.CreateDecal( path,
+			color: TexContent( assetsDir, texturesDir, tex.Color ),
+			normal: TexContent( assetsDir, texturesDir, tex.Normal ),
+			rmo: TexContent( assetsDir, texturesDir, tex.RoughMetalOcclusion ),
+			emissive: TexContent( assetsDir, texturesDir, tex.Emissive ),
+			height: TexContent( assetsDir, texturesDir, tex.Height ) );
+
+		if ( asset is null )
+		{
+			summary.Warnings.Add( $"{baseName}: failed to create the decal - see console." );
+			return ToContentPath( assetsDir, path );
+		}
+
+		summary.Materials++;
+
+		if ( tex.Color is null )
+			summary.Warnings.Add( $"{baseName}: decal has no colour texture - its alpha is what masks a decal, so this one won't show." );
+
+		return asset.Path;
 	}
 
 	/// <summary>
@@ -505,6 +611,8 @@ public static class AssetImporter
 		if ( t.Emissive != null ) n++;
 		if ( t.TintMask != null ) n++;
 		if ( t.SelfIllumMask != null ) n++;
+		if ( t.Height != null ) n++;
+		if ( t.RoughMetalOcclusion != null ) n++;
 		return n;
 	}
 

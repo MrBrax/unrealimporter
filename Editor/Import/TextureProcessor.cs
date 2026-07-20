@@ -18,6 +18,12 @@ public class ProcessedTextures
 	public string Emissive;
 	public string TintMask;
 
+	/// <summary>Displacement/height map. Unused by complex.shader; terrain + decal resources want it.</summary>
+	public string Height;
+
+	/// <summary>Packed R=Roughness G=Metal B=Occlusion, for decal resources (which take one RMO map).</summary>
+	public string RoughMetalOcclusion;
+
 	/// <summary>Grayscale emissive mask extracted from the albedo's alpha (opaque materials with emissive params).</summary>
 	public string SelfIllumMask;
 }
@@ -42,7 +48,12 @@ public enum AlphaRole
 /// </summary>
 public static class TextureProcessor
 {
-	public static ProcessedTextures Process( ManifestMaterial mat, string stagingDir, string outputTextureDir, string baseName, AlphaRole alphaRole = AlphaRole.Translucency )
+	/// <param name="packRmo">
+	/// Emit one packed R=Rough G=Metal B=AO map instead of three grayscale ones. Decal
+	/// resources take a single RMO texture, so splitting and re-packing would be lossy churn.
+	/// </param>
+	/// <param name="wantHeight">Also process the displacement map (terrain + decal resources use it).</param>
+	public static ProcessedTextures Process( ManifestMaterial mat, string stagingDir, string outputTextureDir, string baseName, AlphaRole alphaRole = AlphaRole.Translucency, bool packRmo = false, bool wantHeight = false )
 	{
 		Directory.CreateDirectory( outputTextureDir );
 		var result = new ProcessedTextures();
@@ -77,16 +88,22 @@ public static class TextureProcessor
 				result.Normal = Save( FlipGreen( nrm ), outputTextureDir, baseName, "normal", dispose: true );
 		}
 
-		// --- Packed RMA/ORM -> roughness / metallic / ao ---
+		// --- Packed RMA/ORM -> roughness / metallic / ao (or one repacked RMO) ---
 		if ( !string.IsNullOrEmpty( mat.Rma ) )
 		{
 			using var rma = Load( stagingDir, mat.Rma );
 			if ( rma is not null )
 			{
 				var (rough, metal, ao) = RmaChannels( mat.RmaOrder );
-				result.Roughness = Save( ExtractChannel( rma, rough ), outputTextureDir, baseName, "roughness", dispose: true );
-				result.Metallic = Save( ExtractChannel( rma, metal ), outputTextureDir, baseName, "metallic", dispose: true );
-				result.Ao = Save( ExtractChannel( rma, ao ), outputTextureDir, baseName, "ao", dispose: true );
+
+				if ( packRmo )
+					result.RoughMetalOcclusion = Save( Reorder( rma, rough, metal, ao ), outputTextureDir, baseName, "rmo", dispose: true );
+				else
+				{
+					result.Roughness = Save( ExtractChannel( rma, rough ), outputTextureDir, baseName, "roughness", dispose: true );
+					result.Metallic = Save( ExtractChannel( rma, metal ), outputTextureDir, baseName, "metallic", dispose: true );
+					result.Ao = Save( ExtractChannel( rma, ao ), outputTextureDir, baseName, "ao", dispose: true );
+				}
 			}
 		}
 
@@ -95,6 +112,18 @@ public static class TextureProcessor
 		ProcessSingle( mat.Metal, stagingDir, outputTextureDir, baseName, "metallic", ref result.Metallic );
 		ProcessSingle( mat.Ao, stagingDir, outputTextureDir, baseName, "ao", ref result.Ao );
 		ProcessSingle( mat.Emissive, stagingDir, outputTextureDir, baseName, "emissive", ref result.Emissive );
+
+		if ( wantHeight )
+			ProcessSingle( mat.Height, stagingDir, outputTextureDir, baseName, "height", ref result.Height );
+
+		// A material with separate maps still owes a decal one packed RMO - build it from
+		// whichever of the three exist (missing channels stay black).
+		if ( packRmo && result.RoughMetalOcclusion is null && (result.Roughness ?? result.Metallic ?? result.Ao) is not null )
+		{
+			var packed = Combine( outputTextureDir, result.Roughness, result.Metallic, result.Ao );
+			if ( packed is not null )
+				result.RoughMetalOcclusion = Save( packed, outputTextureDir, baseName, "rmo", dispose: true );
+		}
 
 		// --- Tint mask (grayscale) - export the populated channel so it can drive optional
 		// runtime tinting. Masks are single-channel but the data isn't always in R (this ATV
@@ -172,6 +201,61 @@ public static class TextureProcessor
 		if ( rangeB >= rangeR && rangeB >= rangeG ) return 2;
 		if ( rangeG >= rangeR && rangeG >= rangeB ) return 1;
 		return 0;
+	}
+
+	/// <summary>
+	/// New bitmap with the source channels moved into R=Rough, G=Metal, B=AO order.
+	/// A source that's already RMA comes out unchanged.
+	/// </summary>
+	static Bitmap Reorder( Bitmap src, int rough, int metal, int ao )
+	{
+		var pixels = src.GetPixels();
+		for ( int i = 0; i < pixels.Length; i++ )
+		{
+			var c = pixels[i];
+			float Ch( int n ) => n == 0 ? c.r : n == 1 ? c.g : c.b;
+			pixels[i] = new Color( Ch( rough ), Ch( metal ), Ch( ao ), 1f );
+		}
+
+		var bmp = new Bitmap( src.Width, src.Height );
+		bmp.SetPixels( pixels );
+		return bmp;
+	}
+
+	/// <summary>
+	/// Pack three already-written grayscale maps into one RMO bitmap. Null slots stay black.
+	/// Returns null unless every supplied map shares the same dimensions - rescaling here
+	/// would be guesswork, and a mismatched pack is worse than none.
+	/// </summary>
+	static Bitmap Combine( string dir, string roughFile, string metalFile, string aoFile )
+	{
+		Bitmap Read( string f ) => string.IsNullOrEmpty( f ) ? null : Load( dir, f );
+
+		using var r = Read( roughFile );
+		using var m = Read( metalFile );
+		using var a = Read( aoFile );
+
+		var any = r ?? m ?? a;
+		if ( any is null )
+			return null;
+
+		foreach ( var b in new[] { r, m, a } )
+		{
+			if ( b is not null && (b.Width != any.Width || b.Height != any.Height) )
+				return null;
+		}
+
+		var rp = r?.GetPixels();
+		var mp = m?.GetPixels();
+		var ap = a?.GetPixels();
+		var outPixels = new Color[any.Width * any.Height];
+
+		for ( int i = 0; i < outPixels.Length; i++ )
+			outPixels[i] = new Color( rp?[i].r ?? 0f, mp?[i].r ?? 0f, ap?[i].r ?? 0f, 1f );
+
+		var bmp = new Bitmap( any.Width, any.Height );
+		bmp.SetPixels( outPixels );
+		return bmp;
 	}
 
 	/// <summary>New grayscale bitmap from one channel (0=R, 1=G, 2=B).</summary>

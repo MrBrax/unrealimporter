@@ -497,11 +497,19 @@ public class UnrealImportWindow : Widget
 	Label subfolderLabel;
 	Checkbox lodCheckbox;
 	LineEdit lightScaleEdit;
+	ComboBox materialOutputCombo;
 
 	/// <summary>Combo item order - the layout row adds items in exactly this order.</summary>
 	static readonly ImportLayout[] LayoutOrder = { ImportLayout.Grouped, ImportLayout.Flat, ImportLayout.ClassicSource, ImportLayout.PerAsset };
 
 	ImportLayout SelectedLayout => layoutCombo is null ? ImportLayout.Grouped : LayoutOrder[Math.Clamp( layoutCombo.CurrentIndex, 0, LayoutOrder.Length - 1 )];
+
+	/// <summary>Combo item order - the material output row adds items in exactly this order.</summary>
+	static readonly MaterialOutput[] MaterialOutputOrder = { MaterialOutput.Material, MaterialOutput.Terrain, MaterialOutput.Decal };
+
+	MaterialOutput SelectedMaterialOutput => materialOutputCombo is null
+		? MaterialOutput.Material
+		: MaterialOutputOrder[Math.Clamp( materialOutputCombo.CurrentIndex, 0, MaterialOutputOrder.Length - 1 )];
 
 	string Subfolder() => subfolderEdit?.Text ?? "";
 
@@ -679,8 +687,34 @@ public class UnrealImportWindow : Widget
 				Value = EditorCookie.Get( "unreal_import_lods", true ),
 				ToolTip = "5-level auto chain; untick for full detail at every distance",
 			};
-			lodCheckbox.Toggled = () => EditorCookie.Set( "unreal_import_lods", lodCheckbox.Value );
 			grid.AddCell( 2, 2, lodCheckbox, xSpan: 3 );
+			lodCheckbox.Toggled = () => EditorCookie.Set( "unreal_import_lods", lodCheckbox.Value );
+
+			// Row 3: what a material picked on its own becomes.
+			grid.AddCell( 0, 3, new Label( "Material Output", this ) { FixedWidth = LabelWidth } );
+
+			materialOutputCombo = new ComboBox( this ) { MinimumWidth = 180 };
+			materialOutputCombo.AddItem( "Material (.vmat)", icon: "palette",
+				description: "Standard complex.shader material" );
+			materialOutputCombo.AddItem( "Terrain (.tmat)", icon: "landscape",
+				description: "Terrain Material - tiling ground surface with height blending" );
+			materialOutputCombo.AddItem( "Decal (.decal)", icon: "approval",
+				description: "Decal Definition - projected decal masked by the colour alpha" );
+
+			materialOutputCombo.CurrentIndex = Math.Clamp(
+				EditorCookie.Get( "unreal_import_material_output", 0 ), 0, MaterialOutputOrder.Length - 1 );
+			materialOutputCombo.ItemChanged += () =>
+			{
+				EditorCookie.Set( "unreal_import_material_output", materialOutputCombo.CurrentIndex );
+				UpdateStatus();
+			};
+			grid.AddCell( 1, 3, materialOutputCombo.StyleInput() );
+
+			grid.AddCell( 2, 3, new Label( "Meshes always use .vmat", this )
+			{
+				Color = Theme.TextControl.WithAlpha( 0.5f ),
+				ToolTip = "A model's material slots can't reference a terrain or decal resource, so this only applies to materials imported on their own.",
+			}, xSpan: 3 );
 
 			// Only the field columns absorb extra width; the label columns stay tight.
 			grid.SetColumnStretch( 0, 3, 0, 2, 0 );
@@ -1248,6 +1282,7 @@ public class UnrealImportWindow : Widget
 			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, SelectedLayout, Subfolder(),
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				lightScale: LightScale(),
+				materialOutput: SelectedMaterialOutput,
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n" +
@@ -1311,6 +1346,7 @@ public class UnrealImportWindow : Widget
 			var summary = await AssetImporter.Import( manifest, export.StagingDir, outputFolder, progressToken, SelectedLayout, Subfolder(),
 				generateLods: lodCheckbox is null || lodCheckbox.Value,
 				lightScale: LightScale(),
+				materialOutput: SelectedMaterialOutput,
 				onProgress: ( done, total, name ) => ApplyProgress( progress, new ExportEvent( done, total, $"Importing {name}" ) ) );
 
 			var msg = $"Imported {summary.Models} model(s), {summary.Materials} material(s), {summary.Textures} texture(s).\n\n" +
