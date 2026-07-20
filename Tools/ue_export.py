@@ -11,6 +11,11 @@ StaticMesh under the given content path(s):
 It writes everything under an output (staging) folder, mirroring the /Game
 package structure, plus a single `manifest.json` the s&box tool consumes.
 
+A selection can also contain Materials / Material Instances. Those have no mesh: their
+textures and parameters are exported into a "materials" manifest section, which the s&box
+tool turns into a standalone .vmat (surface packs like Megascans Surfaces are nothing but
+material + textures).
+
 NOTHING here is s&box specific - it only produces raw FBX + PNG + JSON.
 RMA splitting, normal green-flip, renaming and vmdl/vmat generation all happen
 later in the s&box editor tool (using Bitmap/Pixmap).
@@ -44,6 +49,7 @@ Example command line (PowerShell):
 """
 
 import os
+import re
 import json
 import math
 import unreal
@@ -59,7 +65,7 @@ CONFIG_LIMIT = 0   # max meshes to export (0 = no limit). Override with UE_EXPOR
 # Texture role classification by filename suffix (case-insensitive).
 # Add more roles here if a pack uses different conventions.
 ROLE_SUFFIXES = {
-    "alb": ["_alb", "_albedo", "_basecolor", "_color", "_d", "_diff"],
+    "alb": ["_alb", "_albedo", "_basecolor", "_basecolour", "_color", "_d", "_diff", "_b"],
     "nrm": ["_nrm", "_normal", "_n"],
     "rma": ["_rma", "_orm", "_arm", "_mra"],
     "rough": ["_rough", "_roughness", "_r"],
@@ -67,7 +73,14 @@ ROLE_SUFFIXES = {
     "ao": ["_ao", "_occlusion"],
     "emissive": ["_emissive", "_emis", "_emm", "_glow", "_e"],
     "opacity": ["_opacity", "_mask", "_alpha"],
+    # No s&box counterpart in complex.shader - recorded so the user knows it existed.
+    "height": ["_displacement", "_disp", "_height"],
 }
+
+# Channel layout of a packed ORM-family texture, as (role of R, G, B). Megascans ships
+# _ORM (occlusion/roughness/metallic) while Fab packs ship _RMA - splitting one as the
+# other silently swaps roughness and AO, so the layout travels in the manifest.
+RMA_ORDERS = ["rma", "orm", "arm", "mra"]
 
 log = unreal.log
 warn = unreal.log_warning
@@ -97,6 +110,39 @@ def classify_texture(name):
     return None
 
 
+def rma_order(tex_name, param_name):
+    """Channel layout of a packed mask texture ('rma' / 'orm' / 'arm' / 'mra'), default 'rma'.
+
+    Checks the material parameter name first (an MI calling it "ORM" is authoritative),
+    then the texture filename. Matches only whole tokens - otherwise 'T_Norm_Map' reads
+    as ORM and its channels come out shuffled."""
+    pattern = r"(?:^|[_\-. ])(" + "|".join(RMA_ORDERS) + r")(?:$|[_\-. 0-9])"
+    for source in (param_name, tex_name):
+        m = re.search(pattern, (source or "").lower())
+        if m:
+            return m.group(1)
+    return "rma"
+
+
+# The three maps an ORM/RMA-family texture packs. A parameter naming two or more of them
+# ("MetallicRoughnessTexture", Megascans' name for its ORM map) is a packed map, not a
+# single-channel one - binding it as plain roughness hands the shader an RGB texture.
+PACKED_CONCEPTS = [
+    ("roughness", "rough"),
+    ("metallic", "metalness", "metal"),
+    ("ambientocclusion", "occlusion", "ao"),
+]
+
+
+def packed_param(p):
+    """True if a normalised parameter name mentions 2+ of roughness/metallic/occlusion."""
+    hits = 0
+    for names in PACKED_CONCEPTS:
+        if any(n in p for n in names):
+            hits += 1
+    return hits >= 2
+
+
 def classify_param_name(pname):
     """Return a role from a material *parameter* name (more reliable than the filename), or None."""
     p = (pname or "").lower().replace(" ", "").replace("_", "")
@@ -107,7 +153,7 @@ def classify_param_name(pname):
         return "tintmask"
     if "normal" in p:
         return "nrm"
-    if "rma" in p or "orm" in p or "arm" in p or "mra" in p:
+    if "rma" in p or "orm" in p or "arm" in p or "mra" in p or packed_param(p):
         return "rma"
     if "basecolor" in p or "albedo" in p or "diffuse" in p or p in ("color", "basecolour"):
         return "alb"
@@ -180,17 +226,32 @@ def list_static_meshes(paths):
     return found
 
 
-def load_static_meshes(asset_paths):
-    """Load an explicit list of /Game asset paths, keeping only StaticMeshes."""
-    found, seen = [], set()
+def load_selection(asset_paths):
+    """Load an explicit list of /Game asset paths, split into (static meshes, materials).
+
+    A selection can mix the two - meshes go through the FBX pipeline, materials produce a
+    standalone vmat. Anything else (textures, blueprints...) is ignored with a warning."""
+    meshes, materials, seen = [], [], set()
     for p in asset_paths:
         asset = unreal.load_asset(p)
-        if isinstance(asset, unreal.StaticMesh) and asset.get_path_name() not in seen:
-            seen.add(asset.get_path_name())
-            found.append(asset)
-        elif asset is None:
+        if asset is None:
             warn("could not load asset: {}".format(p))
-    return found
+            continue
+
+        key = asset.get_path_name()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if isinstance(asset, unreal.StaticMesh):
+            meshes.append(asset)
+        elif isinstance(asset, unreal.MaterialInterface):
+            materials.append(asset)
+        else:
+            warn("skipping '{}' ({} is neither a StaticMesh nor a Material)".format(
+                p, asset.get_class().get_name()))
+
+    return meshes, materials
 
 
 def _param_name(struct):
@@ -370,82 +431,103 @@ def texture_score(tex_name, mat_name, via_param):
     return score
 
 
+def material_entry(mi, out_dir, exported_textures, slot=None):
+    """Build one manifest material dict for a MaterialInterface, exporting its textures.
+
+    Shared by mesh slots and standalone material imports - the only difference is that a
+    mesh slot carries the FBX slot label."""
+    entry = {"material": mi.get_name()}
+    if slot is not None:
+        entry["slot"] = slot
+
+    named_texs = textures_from_instance(mi)
+    if not named_texs:
+        named_texs = [("", t) for t in textures_from_dependencies(mi)]
+    log("  mi='{}' textures={}".format(mi.get_name(), [t.get_name() for _, t in named_texs]))
+
+    blend_mode = material_blend_mode(mi)
+    if blend_mode:
+        entry["blend_mode"] = blend_mode
+
+    # Scalar/vector params: keep the full set for fidelity, plus a best-guess tint.
+    scalars = scalars_from_instance(mi)
+    vectors = vectors_from_instance(mi)
+    if scalars:
+        entry["scalar_params"] = scalars
+    if vectors:
+        entry["vector_params"] = vectors
+    # Multi-zone tint mask (per-channel tint colors) must be baked into the albedo - s&box's
+    # complex shader only has a single tint. A single uniform tint can stay dynamic.
+    tint_zones = pick_tint_zones(vectors)
+    if tint_zones:
+        entry["tint_zones"] = tint_zones
+        log("    tint_zones={}".format(tint_zones))
+    else:
+        tint_color = pick_tint_color(vectors)
+        if tint_color is not None:
+            entry["tint_color"] = tint_color
+            log("    tint_color={}".format(tint_color))
+    tint_amount = pick_tint_amount(scalars)
+    if tint_amount is not None:
+        entry["tint_amount"] = tint_amount
+
+    # A material can reference several textures that classify to the same role
+    # (e.g. TX_floor_02_ALB + TX_dirtyoverlay_01_ALB are both 'alb' - the master
+    # material blends them, which we can't). Collect candidates and bind the best.
+    candidates = {}   # role -> (score, texture, param name)
+    for order, (pname, tex) in enumerate(named_texs):
+        # The parameter name (e.g. "Tint Mask") is more reliable than the filename suffix.
+        role = classify_param_name(pname)
+        via_param = role is not None
+        if role is None:
+            role = classify_texture(tex.get_name())
+        if role is None:
+            warn("    unclassified texture '{}' (param '{}') (skipped)".format(tex.get_name(), pname))
+            continue
+
+        # A single-channel role on a texture whose name says it's packed (a param called
+        # "Roughness" bound to T_x_ORM) is really the packed map - the filename wins.
+        if role in ("rough", "metal", "ao") and re.search(
+                r"(?:^|[_\-. ])(" + "|".join(RMA_ORDERS) + r")(?:$|[_\-. 0-9])", tex.get_name().lower()):
+            log("    '{}' looks packed - '{}' -> rma".format(tex.get_name(), role))
+            role = "rma"
+
+        score = (texture_score(tex.get_name(), mi.get_name(), via_param), -order)
+        prev = candidates.get(role)
+        if prev is not None:
+            loser = tex.get_name() if score < prev[0] else prev[1].get_name()
+            log("    role '{}' contested, dropping '{}'".format(role, loser))
+        if prev is None or score > prev[0]:
+            candidates[role] = (score, tex, pname)
+
+    for role, (_, tex, pname) in candidates.items():
+        key = tex.get_path_name()
+        if key not in exported_textures:
+            exported_textures[key] = export_one(tex, out_dir, "png")
+        relpath = exported_textures[key]
+        if relpath:
+            entry[role] = relpath
+            # ORM and RMA pack the same three maps in different channels - tell the
+            # importer which, or it splits roughness out of the AO channel.
+            if role == "rma":
+                entry["rma_order"] = rma_order(tex.get_name(), pname)
+                log("    rma_order={}".format(entry["rma_order"]))
+
+    return entry
+
+
 def texture_bindings_for_mesh(mesh, out_dir, exported_textures):
     """Return a list of {slot, <role>: relpath...} per material slot, exporting textures as needed."""
     materials = []
     for sm in mesh.static_materials:
         mi = sm.material_interface
         slot = str(sm.material_slot_name)
-        entry = {"slot": slot}
-        if mi is not None:
-            entry["material"] = mi.get_name()
         if mi is None:
             warn("  slot '{}' has no material".format(slot))
-            materials.append(entry)
+            materials.append({"slot": slot})
             continue
 
-        named_texs = textures_from_instance(mi)
-        if not named_texs:
-            named_texs = [("", t) for t in textures_from_dependencies(mi)]
-        log("  slot='{}' mi='{}' textures={}".format(
-            slot, mi.get_name(), [t.get_name() for _, t in named_texs]))
-
-        blend_mode = material_blend_mode(mi)
-        if blend_mode:
-            entry["blend_mode"] = blend_mode
-
-        # Scalar/vector params: keep the full set for fidelity, plus a best-guess tint.
-        scalars = scalars_from_instance(mi)
-        vectors = vectors_from_instance(mi)
-        if scalars:
-            entry["scalar_params"] = scalars
-        if vectors:
-            entry["vector_params"] = vectors
-        # Multi-zone tint mask (per-channel tint colors) must be baked into the albedo - s&box's
-        # complex shader only has a single tint. A single uniform tint can stay dynamic.
-        tint_zones = pick_tint_zones(vectors)
-        if tint_zones:
-            entry["tint_zones"] = tint_zones
-            log("    tint_zones={}".format(tint_zones))
-        else:
-            tint_color = pick_tint_color(vectors)
-            if tint_color is not None:
-                entry["tint_color"] = tint_color
-                log("    tint_color={}".format(tint_color))
-        tint_amount = pick_tint_amount(scalars)
-        if tint_amount is not None:
-            entry["tint_amount"] = tint_amount
-
-        # A material can reference several textures that classify to the same role
-        # (e.g. TX_floor_02_ALB + TX_dirtyoverlay_01_ALB are both 'alb' - the master
-        # material blends them, which we can't). Collect candidates and bind the best.
-        candidates = {}   # role -> (score, order, texture)
-        for order, (pname, tex) in enumerate(named_texs):
-            # The parameter name (e.g. "Tint Mask") is more reliable than the filename suffix.
-            role = classify_param_name(pname)
-            via_param = role is not None
-            if role is None:
-                role = classify_texture(tex.get_name())
-            if role is None:
-                warn("    unclassified texture '{}' (param '{}') (skipped)".format(tex.get_name(), pname))
-                continue
-
-            score = (texture_score(tex.get_name(), mi.get_name(), via_param), -order)
-            prev = candidates.get(role)
-            if prev is not None:
-                loser = tex.get_name() if score < prev[0] else prev[1].get_name()
-                log("    role '{}' contested, dropping '{}'".format(role, loser))
-            if prev is None or score > prev[0]:
-                candidates[role] = (score, tex)
-
-        for role, (_, tex) in candidates.items():
-            key = tex.get_path_name()
-            if key not in exported_textures:
-                exported_textures[key] = export_one(tex, out_dir, "png")
-            relpath = exported_textures[key]
-            if relpath:
-                entry[role] = relpath
-        materials.append(entry)
+        materials.append(material_entry(mi, out_dir, exported_textures, slot=slot))
     return materials
 
 
@@ -660,13 +742,17 @@ def drop_scatter_meshes(placements, meshes, warnings):
     return [p for p in placements if p["mesh"] not in drop]
 
 
-def export_meshes(meshes, out_dir, manifest):
-    """Run the standard per-mesh export (FBX + textures + material bindings)."""
-    exported_textures = {}   # texture object path -> exported relpath (dedupe shared textures)
+def export_meshes(meshes, out_dir, manifest, exported_textures=None, offset=0, total=None):
+    """Run the standard per-mesh export (FBX + textures + material bindings).
+
+    offset/total let a mixed mesh+material selection log one continuous [i/n] progression."""
+    if exported_textures is None:
+        exported_textures = {}   # texture object path -> exported relpath (dedupe shared textures)
+    total = total or len(meshes)
 
     for i, mesh in enumerate(meshes):
         name = mesh.get_name()
-        log("[{}/{}] {}".format(i + 1, len(meshes), name))
+        log("[{}/{}] {}".format(offset + i + 1, total, name))
 
         fbx_rel = export_one(mesh, out_dir, "fbx", options=fbx_options())
         if fbx_rel is None:
@@ -682,6 +768,23 @@ def export_meshes(meshes, out_dir, manifest):
         })
 
     return exported_textures
+
+
+def export_materials(materials, out_dir, manifest, exported_textures, offset=0, total=None):
+    """Export standalone materials (no mesh): textures + params only.
+
+    The importer turns each of these into a lone .vmat, for surface/decal packs whose
+    whole point is the material (Megascans Surfaces etc.)."""
+    total = total or len(materials)
+
+    for i, mi in enumerate(materials):
+        name = mi.get_name()
+        log("[{}/{}] {} (material)".format(offset + i + 1, total, name))
+
+        entry = material_entry(mi, out_dir, exported_textures)
+        entry["asset"] = name
+        entry["game_path"] = mesh_game_path(mi)
+        manifest.setdefault("materials", []).append(entry)
 
 
 def scene_mode(map_path, out_dir, limit):
@@ -746,33 +849,38 @@ def main():
     # otherwise scan whole content paths (UE_EXPORT_PATHS).
     assets_file = os.environ.get("UE_EXPORT_ASSETS_FILE")
     assets_env = os.environ.get("UE_EXPORT_ASSETS")
+    materials = []
     if assets_file and os.path.exists(assets_file):
         with open(assets_file) as fh:
             asset_paths = [ln.strip() for ln in fh if ln.strip()]
         log("=== ue_export: {} selected asset(s) from file -> {} ===".format(len(asset_paths), out_dir))
-        meshes = load_static_meshes(asset_paths)
+        meshes, materials = load_selection(asset_paths)
     elif assets_env:
         asset_paths = [p for p in assets_env.split(";") if p.strip()]
         log("=== ue_export: {} selected asset(s) -> {} ===".format(len(asset_paths), out_dir))
-        meshes = load_static_meshes(asset_paths)
+        meshes, materials = load_selection(asset_paths)
     else:
         paths = get_scan_paths()
         log("=== ue_export: scanning {} -> {} ===".format(paths, out_dir))
         meshes = list_static_meshes(paths)
-    log("Found {} static mesh(es)".format(len(meshes)))
+    log("Found {} static mesh(es), {} material(s)".format(len(meshes), len(materials)))
 
     if limit > 0:
         meshes = meshes[:limit]
+        materials = materials[:max(0, limit - len(meshes))]
         log("Limiting to first {}".format(limit))
 
-    manifest = {"version": 1, "assets": []}
-    exported_textures = export_meshes(meshes, out_dir, manifest)
+    manifest = {"version": 1, "assets": [], "materials": []}
+    exported_textures = {}
+    total = len(meshes) + len(materials)
+    export_meshes(meshes, out_dir, manifest, exported_textures, total=total)
+    export_materials(materials, out_dir, manifest, exported_textures, offset=len(meshes), total=total)
 
     manifest_path = os.path.join(out_dir, "manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    log("=== wrote {} ({} assets, {} textures) ===".format(
-        manifest_path, len(manifest["assets"]), len(exported_textures)))
+    log("=== wrote {} ({} assets, {} materials, {} textures) ===".format(
+        manifest_path, len(manifest["assets"]), len(manifest["materials"]), len(exported_textures)))
 
 
 if __name__ == "__main__":

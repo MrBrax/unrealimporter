@@ -155,6 +155,9 @@ public static class AssetImporter
 		// Scene placements with an odd number of negative scale axes are true mirrors -
 		// s&box doesn't flip winding for negative GameObject scale, so those need a
 		// mirrored model variant (negative vmdl import_scale bakes the mirror + winding).
+		// Progress spans meshes then standalone materials as one run.
+		var totalAssets = manifest.Assets.Count + (manifest.Materials?.Count ?? 0);
+
 		var needsMirror = new HashSet<string>();
 		foreach ( var p in manifest.Scene?.Placements ?? new() )
 		{
@@ -165,7 +168,7 @@ public static class AssetImporter
 		foreach ( var asset in manifest.Assets )
 		{
 			progressToken.ThrowIfCancellationRequested();
-			onProgress?.Invoke( manifest.Assets.IndexOf( asset ) + 1, manifest.Assets.Count, asset.Asset );
+			onProgress?.Invoke( manifest.Assets.IndexOf( asset ) + 1, totalAssets, asset.Asset );
 
 			if ( string.IsNullOrEmpty( asset.Fbx ) )
 			{
@@ -197,44 +200,7 @@ public static class AssetImporter
 				// which ends up unused). So the remap must key off the material name.
 				var remapKey = !string.IsNullOrEmpty( mat.Material ) ? mat.Material : mat.Slot;
 
-				if ( !writtenVmats.TryGetValue( baseName, out var vmatContent ) )
-				{
-					var emissive = EmissiveParams( mat );
-					var alphaRole = AlphaRoleFor( mat, emissive is not null );
-
-					var tex = TextureProcessor.Process( mat, stagingDir, texturesDir, baseName, alphaRole );
-					summary.Textures += CountTextures( tex );
-
-					// Self-illum source: dedicated emissive texture wins, else the albedo-alpha mask.
-					var selfIllumMask = tex.Emissive ?? tex.SelfIllumMask;
-
-					var vmatText = Kv3Writer.VmatText(
-						color: TexContent( assetsDir, texturesDir, tex.Color ),
-						normal: TexContent( assetsDir, texturesDir, tex.Normal ),
-						roughness: TexContent( assetsDir, texturesDir, tex.Roughness ),
-						metallic: TexContent( assetsDir, texturesDir, tex.Metallic ),
-						ao: TexContent( assetsDir, texturesDir, tex.Ao ),
-						alpha: TexContent( assetsDir, texturesDir, tex.Alpha ),
-						// Tint stays INERT by default (white) so the albedo's own colours show through.
-						// The mask + captured tint colours are emitted for optional manual recolouring.
-						tintMask: TexContent( assetsDir, texturesDir, tex.TintMask ),
-						tintColor: null,
-						tintAmount: null,
-						tintComment: TintComment( mat ),
-						alphaTest: mat.BlendMode?.Contains( "MASKED" ) == true,
-						selfIllumMask: TexContent( assetsDir, texturesDir, selfIllumMask ),
-						selfIllumTint: emissive?.tint,
-						selfIllumBrightness: emissive?.magnitude ?? 1f,
-						selfIllumFromAlbedoAlpha: tex.Emissive is null && tex.SelfIllumMask is not null );
-
-					var vmatPath = Path.Combine( materialsDir, baseName + ".vmat" );
-					await File.WriteAllTextAsync( vmatPath, vmatText, progressToken );
-					summary.Materials++;
-
-					vmatContent = ToContentPath( assetsDir, vmatPath );
-					writtenVmats[baseName] = vmatContent;
-				}
-
+				var vmatContent = await WriteVmat( mat, baseName, stagingDir, assetsDir, materialsDir, texturesDir, writtenVmats, summary, progressToken );
 				remaps.Add( (remapKey, vmatContent) );
 			}
 
@@ -298,6 +264,25 @@ public static class AssetImporter
 				(usedHullMode != "HullPerElement" ? $" (collision: {usedHullMode ?? "none"})" : "") );
 		}
 
+		// Materials picked on their own: no mesh, just a vmat + its textures. Surface packs
+		// (Megascans Surfaces) consist of nothing else.
+		foreach ( var mat in manifest.Materials ?? new() )
+		{
+			progressToken.ThrowIfCancellationRequested();
+
+			var name = mat.Asset ?? mat.Material ?? "material";
+			onProgress?.Invoke( manifest.Assets.Count + manifest.Materials.IndexOf( mat ) + 1, totalAssets, name );
+
+			var baseName = MaterialBaseName( mat );
+			var vmatContent = await WriteVmat( mat, baseName, stagingDir, assetsDir, materialsDir, texturesDir, writtenVmats, summary, progressToken );
+
+			// Nothing compiles this one for us (a model would have pulled it in), so register
+			// it explicitly - otherwise it doesn't show in the asset browser until a rescan.
+			global::Editor.AssetSystem.RegisterFile( Path.Combine( materialsDir, baseName + ".vmat" ) );
+
+			Log.Info( $"Imported material {name} -> {vmatContent}" );
+		}
+
 		// Scene mode: turn the level's placements + lights into a prefab next to the models.
 		if ( manifest.Scene is not null )
 		{
@@ -310,6 +295,57 @@ public static class AssetImporter
 		}
 
 		return summary;
+	}
+
+	/// <summary>
+	/// Write (or reuse) the .vmat for one material, processing its textures on the way.
+	/// Returns the vmat's content path. Shared by mesh slots and standalone material imports.
+	/// </summary>
+	static async Task<string> WriteVmat( ManifestMaterial mat, string baseName, string stagingDir, string assetsDir,
+		string materialsDir, string texturesDir, Dictionary<string, string> writtenVmats, ImportSummary summary, CancellationToken token )
+	{
+		if ( writtenVmats.TryGetValue( baseName, out var existing ) )
+			return existing;
+
+		var emissive = EmissiveParams( mat );
+		var alphaRole = AlphaRoleFor( mat, emissive is not null );
+
+		var tex = TextureProcessor.Process( mat, stagingDir, texturesDir, baseName, alphaRole );
+		summary.Textures += CountTextures( tex );
+
+		// Self-illum source: dedicated emissive texture wins, else the albedo-alpha mask.
+		var selfIllumMask = tex.Emissive ?? tex.SelfIllumMask;
+
+		var vmatText = Kv3Writer.VmatText(
+			color: TexContent( assetsDir, texturesDir, tex.Color ),
+			normal: TexContent( assetsDir, texturesDir, tex.Normal ),
+			roughness: TexContent( assetsDir, texturesDir, tex.Roughness ),
+			metallic: TexContent( assetsDir, texturesDir, tex.Metallic ),
+			ao: TexContent( assetsDir, texturesDir, tex.Ao ),
+			alpha: TexContent( assetsDir, texturesDir, tex.Alpha ),
+			// Tint stays INERT by default (white) so the albedo's own colours show through.
+			// The mask + captured tint colours are emitted for optional manual recolouring.
+			tintMask: TexContent( assetsDir, texturesDir, tex.TintMask ),
+			tintColor: null,
+			tintAmount: null,
+			tintComment: TintComment( mat ),
+			alphaTest: mat.BlendMode?.Contains( "MASKED" ) == true,
+			selfIllumMask: TexContent( assetsDir, texturesDir, selfIllumMask ),
+			selfIllumTint: emissive?.tint,
+			selfIllumBrightness: emissive?.magnitude ?? 1f,
+			selfIllumFromAlbedoAlpha: tex.Emissive is null && tex.SelfIllumMask is not null );
+
+		var vmatPath = Path.Combine( materialsDir, baseName + ".vmat" );
+		await File.WriteAllTextAsync( vmatPath, vmatText, token );
+		summary.Materials++;
+
+		// complex.shader has no displacement input - say so rather than silently dropping it.
+		if ( !string.IsNullOrEmpty( mat.Height ) )
+			summary.Warnings.Add( $"{baseName}: has a displacement/height map, which complex.shader can't use - ignored." );
+
+		var content = ToContentPath( assetsDir, vmatPath );
+		writtenVmats[baseName] = content;
+		return content;
 	}
 
 	/// <summary>

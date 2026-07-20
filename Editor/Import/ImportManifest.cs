@@ -13,6 +13,12 @@ public class ImportManifest
 	[JsonPropertyName( "version" )] public int Version { get; set; }
 	[JsonPropertyName( "assets" )] public List<ManifestAsset> Assets { get; set; } = new();
 
+	/// <summary>
+	/// Materials selected on their own (no mesh) - each becomes a standalone .vmat.
+	/// Surface packs (Megascans Surfaces etc.) are nothing but these.
+	/// </summary>
+	[JsonPropertyName( "materials" )] public List<ManifestMaterial> Materials { get; set; } = new();
+
 	/// <summary>Present only for scene-mode exports (UE_EXPORT_MAP): the level's placements + lights.</summary>
 	[JsonPropertyName( "scene" )] public ManifestScene Scene { get; set; }
 
@@ -36,8 +42,14 @@ public class ManifestAsset
 
 public class ManifestMaterial
 {
-	/// <summary>FBX material slot name (e.g. "lambert2") - this is the vmdl remap key.</summary>
+	/// <summary>FBX material slot name (e.g. "lambert2"). Null for standalone material imports.</summary>
 	[JsonPropertyName( "slot" )] public string Slot { get; set; }
+
+	/// <summary>Standalone imports only: the picked asset's name, for progress/logging.</summary>
+	[JsonPropertyName( "asset" )] public string Asset { get; set; }
+
+	/// <summary>Standalone imports only: the /Game package path it came from.</summary>
+	[JsonPropertyName( "game_path" )] public string GamePath { get; set; }
 
 	/// <summary>Source Material Instance name (e.g. "MI_CardboardBoxes_01a") - used for vmat/texture naming + dedup.</summary>
 	[JsonPropertyName( "material" )] public string Material { get; set; }
@@ -54,6 +66,15 @@ public class ManifestMaterial
 	[JsonPropertyName( "ao" )] public string Ao { get; set; }
 	[JsonPropertyName( "emissive" )] public string Emissive { get; set; }
 	[JsonPropertyName( "opacity" )] public string Opacity { get; set; }
+
+	/// <summary>Displacement/height map. complex.shader has no slot for it - recorded so we can warn.</summary>
+	[JsonPropertyName( "height" )] public string Height { get; set; }
+
+	/// <summary>
+	/// Channel layout of <see cref="Rma"/>: "rma" (R=rough G=metal B=ao, the Fab convention),
+	/// "orm"/"arm" (R=ao G=rough B=metal, Megascans) or "mra". Null on old manifests -> "rma".
+	/// </summary>
+	[JsonPropertyName( "rma_order" )] public string RmaOrder { get; set; }
 
 	/// <summary>Grayscale tint mask (white = full tint). Packed into the normal's alpha by the complex shader.</summary>
 	[JsonPropertyName( "tintmask" )] public string TintMask { get; set; }

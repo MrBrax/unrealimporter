@@ -77,15 +77,16 @@ public static class TextureProcessor
 				result.Normal = Save( FlipGreen( nrm ), outputTextureDir, baseName, "normal", dispose: true );
 		}
 
-		// --- RMA pack -> roughness / metallic / ao ---
+		// --- Packed RMA/ORM -> roughness / metallic / ao ---
 		if ( !string.IsNullOrEmpty( mat.Rma ) )
 		{
 			using var rma = Load( stagingDir, mat.Rma );
 			if ( rma is not null )
 			{
-				result.Roughness = Save( ExtractChannel( rma, 0 ), outputTextureDir, baseName, "roughness", dispose: true );
-				result.Metallic = Save( ExtractChannel( rma, 1 ), outputTextureDir, baseName, "metallic", dispose: true );
-				result.Ao = Save( ExtractChannel( rma, 2 ), outputTextureDir, baseName, "ao", dispose: true );
+				var (rough, metal, ao) = RmaChannels( mat.RmaOrder );
+				result.Roughness = Save( ExtractChannel( rma, rough ), outputTextureDir, baseName, "roughness", dispose: true );
+				result.Metallic = Save( ExtractChannel( rma, metal ), outputTextureDir, baseName, "metallic", dispose: true );
+				result.Ao = Save( ExtractChannel( rma, ao ), outputTextureDir, baseName, "ao", dispose: true );
 			}
 		}
 
@@ -107,6 +108,19 @@ public static class TextureProcessor
 
 		return result;
 	}
+
+	/// <summary>
+	/// Which channel index (0=R, 1=G, 2=B) holds roughness / metalness / AO for a packed
+	/// mask, from the manifest's layout name. Fab ships _RMA, Megascans ships _ORM with the
+	/// exact same look but a different order - splitting one as the other swaps roughness
+	/// and AO, which reads as a flat, wrongly-shiny surface rather than an obvious error.
+	/// </summary>
+	static (int rough, int metal, int ao) RmaChannels( string order ) => (order ?? "rma").ToLowerInvariant() switch
+	{
+		"orm" or "arm" => (1, 2, 0),
+		"mra" => (1, 0, 2),
+		_ => (0, 1, 2),
+	};
 
 	static void ProcessSingle( string rel, string stagingDir, string outDir, string baseName, string role, ref string slot )
 	{

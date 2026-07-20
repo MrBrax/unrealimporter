@@ -8,8 +8,11 @@ using Sandbox;
 namespace Editor.UnrealImporter;
 
 /// <summary>
-/// Editor tool: pick an Unreal project folder, tick the static meshes to bring over, and export
-/// them to sbox (FBX + vmat + vmdl) via a headless Unreal pass + kv3 generation.
+/// Editor tool: pick an Unreal project folder, tick the static meshes and materials to bring
+/// over, and export them to sbox (FBX + vmat + vmdl) via a headless Unreal pass + kv3 generation.
+///
+/// Materials can be picked on their own - they import as a standalone vmat, which is the whole
+/// point of surface packs (Megascans Surfaces are a material plus its textures, no mesh).
 ///
 /// The browser is a folder tree mirroring /Game. Folder checkboxes (tri-state) tick whole
 /// subtrees, maps sit inline in their folders (double-click to import), and each mesh row
@@ -19,17 +22,30 @@ namespace Editor.UnrealImporter;
 /// TODO: max texture resolution selection
 /// TODO: make async with progress bar
 /// </summary>
-[EditorApp( "Unreal Importer", "move_to_inbox", "Import Unreal / Fab static meshes into s&box" )]
+[EditorApp( "Unreal Importer", "move_to_inbox", "Import Unreal / Fab meshes and materials into s&box" )]
 public class UnrealImportWindow : Widget
 {
-	class MeshEntry
+	/// <summary>What an entry turns into once imported.</summary>
+	enum AssetKind
 	{
+		/// <summary>StaticMesh -> fbx + vmdl (+ the vmats of its slots).</summary>
+		Mesh,
+
+		/// <summary>Material / Material Instance -> a standalone vmat.</summary>
+		Material,
+	}
+
+	class AssetEntry
+	{
+		public AssetKind Kind;
 		public string GamePath;     // /Game/.../SM_X
 		public string AbsPath;      // ...\Content\...\SM_X.uasset
 		public string Display;      // GamePath without the /Game/ prefix
 		public long SizeBytes;      // .uasset on disk (uncooked, so this is the whole asset)
-		public long Triangles = -1; // from the uasset's asset-registry tags; -1 until read
+		public long Triangles = -1; // meshes only: from the uasset's asset-registry tags; -1 until read
 		public bool Selected;       // opt-in: nothing ticked until the user picks
+
+		public bool IsMesh => Kind == AssetKind.Mesh;
 	}
 
 	class MapEntry
@@ -42,11 +58,11 @@ public class UnrealImportWindow : Widget
 	class FolderBucket
 	{
 		public readonly SortedSet<string> Subfolders = new( StringComparer.OrdinalIgnoreCase );
-		public readonly List<MeshEntry> Meshes = new();
+		public readonly List<AssetEntry> Assets = new();
 		public readonly List<MapEntry> Maps = new();
 
-		/// <summary>Every mesh anywhere below this folder - drives the tri-state checkbox.</summary>
-		public readonly List<MeshEntry> Subtree = new();
+		/// <summary>Every asset anywhere below this folder - drives the tri-state checkbox.</summary>
+		public readonly List<AssetEntry> Subtree = new();
 	}
 
 	const float CheckWidth = 26;
@@ -242,7 +258,7 @@ public class UnrealImportWindow : Widget
 			meta.Right -= 6;
 			Paint.SetPen( Theme.TextControl.WithAlpha( 0.4f ) );
 			Paint.SetDefaultFont( 7 );
-			Paint.DrawText( meta, total == 1 ? "1 mesh" : $"{total} meshes", TextFlag.RightCenter );
+			Paint.DrawText( meta, win.SubtreeSummary( path ), TextFlag.RightCenter );
 
 			var text = r;
 			text.Left += CheckWidth + 26;
@@ -260,21 +276,24 @@ public class UnrealImportWindow : Widget
 		}
 	}
 
-	class MeshNode : TreeNode, ICheckRow, IPreviewRow
+	class AssetNode : TreeNode, ICheckRow, IPreviewRow
 	{
 		readonly UnrealImportWindow win;
-		readonly MeshEntry entry;
+		readonly AssetEntry entry;
 		readonly bool fullPath;
 
 		Pixmap pixmap;
 		bool thumbResolved;
 
+		/// <summary>Placeholder + material-row icon: a mesh reads as a solid, a material as a swatch.</summary>
+		string Icon => entry.IsMesh ? "view_in_ar" : "palette";
+
 		public Pixmap PreviewPixmap => pixmap;
 		public string PreviewCaption => entry.Triangles >= 0
 			? $"{entry.Display}  ·  {FormatCount( entry.Triangles )} tris"
-			: entry.Display;
+			: entry.IsMesh ? entry.Display : $"{entry.Display}  ·  material";
 
-		public MeshNode( UnrealImportWindow win, MeshEntry entry, bool fullPath )
+		public AssetNode( UnrealImportWindow win, AssetEntry entry, bool fullPath )
 		{
 			this.win = win;
 			this.entry = entry;
@@ -287,7 +306,8 @@ public class UnrealImportWindow : Widget
 			else
 				_ = ResolveThumb();
 
-			if ( entry.Triangles < 0 )
+			// Triangle counts are a mesh-only asset-registry tag.
+			if ( entry.IsMesh && entry.Triangles < 0 )
 				_ = ResolveStats();
 		}
 
@@ -334,7 +354,7 @@ public class UnrealImportWindow : Widget
 			else
 			{
 				Paint.SetPen( Theme.TextControl.WithAlpha( thumbResolved ? 0.25f : 0.1f ) );
-				Paint.DrawIcon( thumb, "view_in_ar", 18 );
+				Paint.DrawIcon( thumb, Icon, 18 );
 			}
 
 			var meta = r;
@@ -343,7 +363,9 @@ public class UnrealImportWindow : Widget
 			Paint.SetDefaultFont( 7 );
 			var label = entry.Triangles >= 0
 				? $"{FormatCount( entry.Triangles )} tris · {FormatSize( entry.SizeBytes )}"
-				: FormatSize( entry.SizeBytes );
+				: entry.IsMesh
+					? FormatSize( entry.SizeBytes )
+					: $"material · {FormatSize( entry.SizeBytes )}";
 			Paint.DrawText( meta, label, TextFlag.RightCenter );
 
 			var text = r;
@@ -456,7 +478,7 @@ public class UnrealImportWindow : Widget
 	string searchFilter = "";
 	bool flatView;
 
-	readonly List<MeshEntry> entries = new();
+	readonly List<AssetEntry> entries = new();
 	readonly List<MapEntry> mapEntries = new();
 	readonly Dictionary<string, FolderBucket> folders = new( StringComparer.OrdinalIgnoreCase );
 	List<TreeNode> rootNodes = new();
@@ -509,7 +531,7 @@ public class UnrealImportWindow : Widget
 		Layout.Margin = 16;
 
 		Layout.Add( new WarningBox(
-			"Select an Unreal project folder, tick the static meshes you want, and export.\n" +
+			"Select an Unreal project folder, tick the meshes and materials you want, and export.\n" +
 			"This runs a headless Unreal pass to extract FBX + textures, then generates vmdl/vmat.\n" +
 			"The editor may be unresponsive while Unreal runs.", this ) );
 
@@ -526,7 +548,7 @@ public class UnrealImportWindow : Widget
 
 		// Search row
 		{
-			searchEdit = new LineEdit( this ) { PlaceholderText = "⌕  Search meshes", ToolTip = "Filter the list by name or path" };
+			searchEdit = new LineEdit( this ) { PlaceholderText = "⌕  Search meshes and materials", ToolTip = "Filter the list by name or path" };
 			searchEdit.TextEdited += t =>
 			{
 				searchFilter = t ?? "";
@@ -676,7 +698,7 @@ public class UnrealImportWindow : Widget
 			uprojectPath = outputPath;
 			uprojectFolder = Path.GetDirectoryName( outputPath );
 			projectLabel.Text = $"{Path.GetFileName( outputPath )}  ({Path.GetFileName( uprojectFolder )})";
-			ScanMeshes();
+			ScanAssets();
 		}
 	}
 
@@ -734,7 +756,7 @@ public class UnrealImportWindow : Widget
 		EditorCookie.Set( "unreal_import_project_path", uprojectPath );
 		Log.Info( $"UnrealImportWindow: storing last project path: {uprojectPath}" );
 
-		ScanMeshes();
+		ScanAssets();
 	}
 
 	void PickOutput()
@@ -752,7 +774,7 @@ public class UnrealImportWindow : Widget
 		UpdateExportEnabled();
 	}
 
-	void ScanMeshes()
+	void ScanAssets()
 	{
 		entries.Clear();
 		mapEntries.Clear();
@@ -778,18 +800,15 @@ public class UnrealImportWindow : Widget
 			// FileInfo rather than plain paths so we get the size without a second stat per file.
 			foreach ( var file in new DirectoryInfo( content ).EnumerateFiles( "*.uasset", SearchOption.AllDirectories ) )
 			{
-				// Heuristic: meshes live in a "Meshes" folder and/or are named SM_*.
-				var dir = file.DirectoryName ?? "";
-				var name = Path.GetFileNameWithoutExtension( file.Name );
-				bool looksLikeMesh = dir.Replace( '\\', '/' ).Contains( "/Meshes", StringComparison.OrdinalIgnoreCase )
-					|| name.StartsWith( "SM_", StringComparison.OrdinalIgnoreCase );
-				if ( !looksLikeMesh )
+				var kind = ClassifyUasset( file );
+				if ( kind is null )
 					continue;
 
 				var gamePath = HeadlessExporter.ToGamePath( uprojectFolder, file.FullName );
 
-				entries.Add( new MeshEntry
+				entries.Add( new AssetEntry
 				{
+					Kind = kind.Value,
 					AbsPath = file.FullName,
 					GamePath = gamePath,
 					// Show the path relative to /Game for readability.
@@ -801,7 +820,7 @@ public class UnrealImportWindow : Widget
 
 		if ( entries.Count == 0 )
 		{
-			Log.Warning( $"No static meshes found in {uprojectFolder}/Content." );
+			Log.Warning( $"No static meshes or materials found in {uprojectFolder}/Content." );
 		}
 
 		entries.Sort( ( a, b ) => string.CompareOrdinal( a.GamePath, b.GamePath ) );
@@ -814,11 +833,45 @@ public class UnrealImportWindow : Widget
 	}
 
 	/// <summary>
+	/// What a .uasset is, from its name and folder - null for anything we can't import.
+	///
+	/// Reading the real class out of the package would need version-dependent header parsing;
+	/// Unreal/Fab naming is conventional enough that prefixes plus the type folder do the job.
+	/// The exporter re-checks the actual type when it loads the asset, so a wrong guess here
+	/// costs a warning, not a broken import.
+	/// </summary>
+	static AssetKind? ClassifyUasset( FileInfo file )
+	{
+		var dir = (file.DirectoryName ?? "").Replace( '\\', '/' );
+		var name = Path.GetFileNameWithoutExtension( file.Name );
+
+		// Name prefixes are stronger evidence than the folder - a material parked in a
+		// Meshes/ folder is still a material.
+		if ( name.StartsWith( "SM_", StringComparison.OrdinalIgnoreCase ) )
+			return AssetKind.Mesh;
+
+		// MI_ = Material Instance, M_/MM_ = Material (master). Textures are T_/TX_, so the
+		// single-letter M_ prefix doesn't collide with anything else we'd want to list.
+		if ( name.StartsWith( "MI_", StringComparison.OrdinalIgnoreCase )
+			|| name.StartsWith( "M_", StringComparison.OrdinalIgnoreCase )
+			|| name.StartsWith( "MM_", StringComparison.OrdinalIgnoreCase ) )
+			return AssetKind.Material;
+
+		if ( dir.Contains( "/Meshes", StringComparison.OrdinalIgnoreCase ) )
+			return AssetKind.Mesh;
+
+		if ( dir.Contains( "/Materials", StringComparison.OrdinalIgnoreCase ) )
+			return AssetKind.Material;
+
+		return null;
+	}
+
+	/// <summary>
 	/// Background pass reading tri counts for everything, so folder rows and the status
 	/// total become accurate without expanding every folder. Throttled inside
 	/// UassetMeshStats; cached on disk so later opens are instant.
 	/// </summary>
-	async Task WarmStats( List<MeshEntry> list )
+	async Task WarmStats( List<AssetEntry> list )
 	{
 		int done = 0;
 		foreach ( var e in list )
@@ -879,7 +932,7 @@ public class UnrealImportWindow : Widget
 		{
 			var dir = DirOf( e.Display );
 			RegisterChain( dir );
-			Bucket( dir ).Meshes.Add( e );
+			Bucket( dir ).Assets.Add( e );
 
 			for ( var p = dir; ; p = ParentOf( p ) )
 			{
@@ -900,7 +953,7 @@ public class UnrealImportWindow : Widget
 	}
 
 	bool FolderHasChildren( string path )
-		=> folders.TryGetValue( path, out var b ) && (b.Subfolders.Count > 0 || b.Meshes.Count > 0 || b.Maps.Count > 0);
+		=> folders.TryGetValue( path, out var b ) && (b.Subfolders.Count > 0 || b.Assets.Count > 0 || b.Maps.Count > 0);
 
 	IEnumerable<TreeNode> BuildFolderChildNodes( string path )
 	{
@@ -913,8 +966,8 @@ public class UnrealImportWindow : Widget
 		foreach ( var m in b.Maps )
 			yield return new MapNode( this, m, fullPath: false );
 
-		foreach ( var e in b.Meshes )
-			yield return new MeshNode( this, e, fullPath: false );
+		foreach ( var e in b.Assets )
+			yield return new AssetNode( this, e, fullPath: false );
 	}
 
 	(int selected, int total) SubtreeSelection( string path )
@@ -928,6 +981,24 @@ public class UnrealImportWindow : Widget
 				sel++;
 
 		return (sel, b.Subtree.Count);
+	}
+
+	/// <summary>Right-hand folder label: "12 meshes · 3 materials", omitting whichever is zero.</summary>
+	string SubtreeSummary( string path )
+	{
+		if ( !folders.TryGetValue( path, out var b ) )
+			return "";
+
+		int meshes = b.Subtree.Count( e => e.IsMesh );
+		int mats = b.Subtree.Count - meshes;
+
+		var parts = new List<string>();
+		if ( meshes > 0 )
+			parts.Add( meshes == 1 ? "1 mesh" : $"{meshes} meshes" );
+		if ( mats > 0 )
+			parts.Add( mats == 1 ? "1 material" : $"{mats} materials" );
+
+		return string.Join( " · ", parts );
 	}
 
 	void SetFolderSelected( string path, bool on )
@@ -945,7 +1016,7 @@ public class UnrealImportWindow : Widget
 	// ---- filtering / tree ----
 
 	/// <summary>Entries matching the current search box, in list order.</summary>
-	IEnumerable<MeshEntry> Filtered()
+	IEnumerable<AssetEntry> Filtered()
 	{
 		if ( string.IsNullOrWhiteSpace( searchFilter ) )
 			return entries;
@@ -986,7 +1057,7 @@ public class UnrealImportWindow : Widget
 			// so this doubles as the plain flat view.
 			var flat = new List<TreeNode>();
 			flat.AddRange( FilteredMaps().Select( m => (TreeNode)new MapNode( this, m, fullPath: true ) ) );
-			flat.AddRange( Filtered().Select( e => (TreeNode)new MeshNode( this, e, fullPath: true ) ) );
+			flat.AddRange( Filtered().Select( e => (TreeNode)new AssetNode( this, e, fullPath: true ) ) );
 
 			if ( flat.Count == 0 && searching )
 				flat.Add( new TreeNode( $"No matches for \"{searchFilter.Trim()}\"" ) );
@@ -1034,16 +1105,17 @@ public class UnrealImportWindow : Widget
 		var selected = entries.Where( e => e.Selected ).ToList();
 		var shown = Filtered().Count();
 
-		var text = shown == entries.Count
-			? $"{entries.Count} static mesh(es) found."
-			: $"{shown} of {entries.Count} static mesh(es) shown.";
+		int meshCount = entries.Count( e => e.IsMesh );
+		var found = $"{meshCount} static mesh(es), {entries.Count - meshCount} material(s)";
+		var text = shown == entries.Count ? $"{found} found." : $"{shown} of {found} shown.";
 
 		if ( selected.Count > 0 )
 		{
 			text += $"  {selected.Count} selected ({FormatSize( selected.Sum( e => e.SizeBytes ) )}";
 
+			// Tri counts only exist for meshes - "+" means some are still being read.
 			long tris = selected.Sum( e => Math.Max( 0, e.Triangles ) );
-			bool partial = selected.Any( e => e.Triangles < 0 );
+			bool partial = selected.Any( e => e.IsMesh && e.Triangles < 0 );
 			if ( tris > 0 )
 				text += $", {FormatCount( tris )}{(partial ? "+" : "")} tris";
 
@@ -1168,10 +1240,11 @@ public class UnrealImportWindow : Widget
 	{
 		// Deliberately ignores the search filter - ticks persist across filtering, so everything
 		// the user has selected gets exported whether or not it's on screen right now.
-		var selected = entries.Where( e => e.Selected ).Select( e => e.GamePath ).ToList();
+		var selectedEntries = entries.Where( e => e.Selected ).ToList();
+		var selected = selectedEntries.Select( e => e.GamePath ).ToList();
 		if ( selected.Count == 0 )
 		{
-			EditorUtility.DisplayDialog( "Nothing selected", "Tick at least one mesh to export." );
+			EditorUtility.DisplayDialog( "Nothing selected", "Tick at least one mesh or material to export." );
 			return;
 		}
 
@@ -1180,7 +1253,12 @@ public class UnrealImportWindow : Widget
 
 		await Task.Delay( 100 );
 
-		statusLabel.Text = $"Exporting {selected.Count} mesh(es) via headless Unreal... this can take a minute.";
+		// Meshes and materials go over in one selection - the export script routes by asset type.
+		int meshCount = selectedEntries.Count( e => e.IsMesh );
+		var what = meshCount == selected.Count ? $"{meshCount} mesh(es)"
+			: meshCount == 0 ? $"{selected.Count} material(s)"
+			: $"{meshCount} mesh(es) + {selected.Count - meshCount} material(s)";
+		statusLabel.Text = $"Exporting {what} via headless Unreal... this can take a minute.";
 
 		using var progress = Application.Editor.ProgressSection();
 
