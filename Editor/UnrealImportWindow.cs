@@ -238,7 +238,7 @@ public class UnrealImportWindow : Widget
 
 		public override void OnPaint( VirtualWidget item )
 		{
-			PaintSelection( item );
+			ImportStyle.PaintRow( item, TreeView );
 			var r = item.Rect;
 
 			var (sel, total) = win.SubtreeSelection( path );
@@ -331,7 +331,7 @@ public class UnrealImportWindow : Widget
 
 		public override void OnPaint( VirtualWidget item )
 		{
-			PaintSelection( item );
+			ImportStyle.PaintRow( item, TreeView );
 			var r = item.Rect;
 
 			var check = r;
@@ -425,7 +425,7 @@ public class UnrealImportWindow : Widget
 
 		public override void OnPaint( VirtualWidget item )
 		{
-			PaintSelection( item );
+			ImportStyle.PaintRow( item, TreeView );
 			var r = item.Rect;
 
 			var icon = r;
@@ -549,7 +549,7 @@ public class UnrealImportWindow : Widget
 				ReadOnly = true,
 				PlaceholderText = "No Unreal project selected",
 				ToolTip = "The .uproject the assets are read from",
-			};
+			}.StyleInput();
 			row.Add( projectLabel, 1 );
 			row.Add( new Button( "Browse Project...", "folder_open", this ) { Clicked = PickProject } );
 			Layout.Add( row );
@@ -563,6 +563,7 @@ public class UnrealImportWindow : Widget
 			toolRow.Spacing = 8;
 
 			searchEdit = new LineEdit( this ) { PlaceholderText = "⌕  Search meshes and materials", ToolTip = "Filter the list by name or path" };
+			searchEdit.StyleInput();
 			searchEdit.TextEdited += t =>
 			{
 				searchFilter = t ?? "";
@@ -592,6 +593,11 @@ public class UnrealImportWindow : Widget
 
 			tree = new ImportTreeView( this );
 			tree.MultiSelect = false;
+			// Sunk into the section: darker than the panel so the row stripes read against it.
+			tree.SetStyles(
+				$"background-color: {Theme.WindowBackground.Hex};" +
+				$"border: 1px solid {Theme.Border.WithAlpha( 0.5f ).Hex};" +
+				$"border-radius: {Theme.ControlRadius}px;" );
 			section.Layout.Add( tree, 1 );
 
 			// The section (and the tree inside it) takes all the leftover height.
@@ -613,7 +619,7 @@ public class UnrealImportWindow : Widget
 				ReadOnly = true,
 				PlaceholderText = "No output folder selected",
 				ToolTip = "Where generated assets are written",
-			};
+			}.StyleInput();
 			grid.AddCell( 1, 0, outputLabel, xSpan: 3 );
 			grid.AddCell( 4, 0, new Button( "Output...", "drive_file_move", this ) { Clicked = PickOutput } );
 
@@ -637,7 +643,7 @@ public class UnrealImportWindow : Widget
 				EditorCookie.Set( "unreal_import_layout", layoutCombo.CurrentIndex );
 				UpdateLayoutRow();
 			};
-			grid.AddCell( 1, 1, layoutCombo );
+			grid.AddCell( 1, 1, layoutCombo.StyleInput() );
 
 			// Scene-light brightness: the conversion is calibrated, but UE maps lean on
 			// auto-exposure that s&box doesn't have - taste (and pack) varies, so expose a knob.
@@ -648,7 +654,7 @@ public class UnrealImportWindow : Widget
 				ToolTip = "Multiplier on converted map light intensity. 1 = calibrated default; lower for moodier interiors, higher if too dark. Applies on (re)import.",
 			};
 			lightScaleEdit.TextEdited += _ => EditorCookie.Set( "unreal_import_light_scale", LightScale() );
-			grid.AddCell( 3, 1, lightScaleEdit, xSpan: 2 );
+			grid.AddCell( 3, 1, lightScaleEdit.StyleInput(), xSpan: 2 );
 
 			// Row 2: subfolder | generate LODs.
 			subfolderLabel = new Label( "Subfolder", this ) { FixedWidth = LabelWidth };
@@ -666,7 +672,7 @@ public class UnrealImportWindow : Widget
 				if ( outputLabel is not null )
 					outputLabel.Text = OutputDisplay();
 			};
-			grid.AddCell( 1, 2, subfolderEdit );
+			grid.AddCell( 1, 2, subfolderEdit.StyleInput() );
 
 			lodCheckbox = new Checkbox( "Generate LODs", this )
 			{
