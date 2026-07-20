@@ -483,8 +483,11 @@ public class UnrealImportWindow : Widget
 	readonly Dictionary<string, FolderBucket> folders = new( StringComparer.OrdinalIgnoreCase );
 	List<TreeNode> rootNodes = new();
 
-	Label projectLabel;
-	Label outputLabel;
+	/// <summary>Width of the left-hand label column, so the settings rows line up.</summary>
+	const float LabelWidth = 110;
+
+	LineEdit projectLabel;
+	LineEdit outputLabel;
 	Label statusLabel;
 	LineEdit searchEdit;
 	ImportTreeView tree;
@@ -496,7 +499,7 @@ public class UnrealImportWindow : Widget
 	LineEdit lightScaleEdit;
 
 	/// <summary>Combo item order - the layout row adds items in exactly this order.</summary>
-	static readonly ImportLayout[] LayoutOrder = { ImportLayout.Grouped, ImportLayout.Flat, ImportLayout.ClassicSource };
+	static readonly ImportLayout[] LayoutOrder = { ImportLayout.Grouped, ImportLayout.Flat, ImportLayout.ClassicSource, ImportLayout.PerAsset };
 
 	ImportLayout SelectedLayout => layoutCombo is null ? ImportLayout.Grouped : LayoutOrder[Math.Clamp( layoutCombo.CurrentIndex, 0, LayoutOrder.Length - 1 )];
 
@@ -539,15 +542,26 @@ public class UnrealImportWindow : Widget
 		{
 			var row = Layout.Row();
 			row.Spacing = 8;
-			projectLabel = new Label( "No Unreal project selected", this ) { WordWrap = false };
+			row.Add( new Label( "Unreal Project", this ) { FixedWidth = LabelWidth } );
+
+			projectLabel = new LineEdit( this )
+			{
+				ReadOnly = true,
+				PlaceholderText = "No Unreal project selected",
+				ToolTip = "The .uproject the assets are read from",
+			};
 			row.Add( projectLabel, 1 );
-			var browse = new Button( "Browse Project...", "folder_open", this ) { Clicked = PickProject };
-			row.Add( browse );
+			row.Add( new Button( "Browse Project...", "folder_open", this ) { Clicked = PickProject } );
 			Layout.Add( row );
 		}
 
-		// Search row
+		// ---- Asset Selection ----
 		{
+			var section = new Fieldset( "Asset Selection", this );
+
+			var toolRow = Layout.Row();
+			toolRow.Spacing = 8;
+
 			searchEdit = new LineEdit( this ) { PlaceholderText = "⌕  Search meshes and materials", ToolTip = "Filter the list by name or path" };
 			searchEdit.TextEdited += t =>
 			{
@@ -555,22 +569,16 @@ public class UnrealImportWindow : Widget
 				RefreshTree();
 				UpdateStatus();
 			};
-			Layout.Add( searchEdit );
-		}
+			toolRow.Add( searchEdit, 1 );
 
-		// Select all/none row
-		{
-			var row = Layout.Row();
-			row.Spacing = 8;
-			row.Add( new Button( "Select All", "done_all", this ) { Clicked = () => SetAll( true ) } );
-			row.Add( new Button( "Select None", "remove_done", this ) { Clicked = () => SetAll( false ) } );
-			row.AddStretchCell();
+			toolRow.Add( new Button( "Select All", "done_all", this ) { Clicked = () => SetAll( true ) } );
+			toolRow.Add( new Button( "Select None", "remove_done", this ) { Clicked = () => SetAll( false ) } );
 
 			flatView = EditorCookie.Get( "unreal_import_flat_view", false );
 			var flatToggle = new Checkbox( "Flat list", this )
 			{
 				Value = flatView,
-				ToolTip = "Show every mesh as one flat list instead of the folder tree",
+				ToolTip = "Show every asset as one flat list instead of the folder tree",
 			};
 			flatToggle.Toggled = () =>
 			{
@@ -578,47 +586,73 @@ public class UnrealImportWindow : Widget
 				EditorCookie.Set( "unreal_import_flat_view", flatView );
 				RefreshTree();
 			};
-			row.Add( flatToggle );
+			toolRow.Add( flatToggle );
 
-			Layout.Add( row );
+			section.Layout.Add( toolRow );
+
+			tree = new ImportTreeView( this );
+			tree.MultiSelect = false;
+			section.Layout.Add( tree, 1 );
+
+			// The section (and the tree inside it) takes all the leftover height.
+			Layout.Add( section, 1 );
 		}
 
-		// Mesh tree
-		tree = new ImportTreeView( this );
-		tree.MultiSelect = false;
-		Layout.Add( tree, 1 );
-
-		// Output row
+		// ---- Export Settings ----
 		{
-			var row = Layout.Row();
-			row.Spacing = 8;
-			outputLabel = new Label( OutputDisplay(), this ) { WordWrap = false };
-			row.Add( outputLabel, 1 );
-			var browse = new Button( "Output...", "drive_file_move", this ) { Clicked = PickOutput };
-			row.Add( browse );
-			Layout.Add( row );
-		}
+			var section = new Fieldset( "Export Settings", this );
 
-		// Output layout row
-		{
-			var row = Layout.Row();
-			row.Spacing = 8;
-			row.Add( new Label( "Layout", this ) );
+			var grid = Layout.Grid();
+			grid.Spacing = 8;
+			section.Layout.Add( grid );
 
-			layoutCombo = new ComboBox( this ) { MinimumWidth = 200 };
+			// Row 0: output directory, spanning the full width.
+			grid.AddCell( 0, 0, new Label( "Output Directory", this ) { FixedWidth = LabelWidth } );
+			outputLabel = new LineEdit( this )
+			{
+				ReadOnly = true,
+				PlaceholderText = "No output folder selected",
+				ToolTip = "Where generated assets are written",
+			};
+			grid.AddCell( 1, 0, outputLabel, xSpan: 3 );
+			grid.AddCell( 4, 0, new Button( "Output...", "drive_file_move", this ) { Clicked = PickOutput } );
+
+			// Row 1: layout | map light brightness.
+			grid.AddCell( 0, 1, new Label( "Layout", this ) { FixedWidth = LabelWidth } );
+
+			layoutCombo = new ComboBox( this ) { MinimumWidth = 180 };
 			layoutCombo.AddItem( "Grouped", icon: "folder",
 				description: "<output>/models, /materials, /textures" );
 			layoutCombo.AddItem( "Flat", icon: "folder_open",
 				description: "Everything directly in the output folder" );
 			layoutCombo.AddItem( "Classic Source", icon: "account_tree",
-				description: "Assets/models/<sub> for fbx+vmdl, Assets/materials/<sub> for vmat+textures" );
+				description: "Assets/models/<subdir> for fbx+vmdl, Assets/materials/<subdir> for vmat+textures" );
+			layoutCombo.AddItem( "Per Asset", icon: "inventory_2",
+				description: "<output>/<asset>/ - each asset's model, materials and textures together" );
 
 			var savedLayout = EditorCookie.Get( "unreal_import_layout", 0 );
 			layoutCombo.CurrentIndex = Math.Clamp( savedLayout, 0, LayoutOrder.Length - 1 );
-			row.Add( layoutCombo );
+			layoutCombo.ItemChanged += () =>
+			{
+				EditorCookie.Set( "unreal_import_layout", layoutCombo.CurrentIndex );
+				UpdateLayoutRow();
+			};
+			grid.AddCell( 1, 1, layoutCombo );
 
-			subfolderLabel = new Label( "Subfolder", this );
-			row.Add( subfolderLabel );
+			// Scene-light brightness: the conversion is calibrated, but UE maps lean on
+			// auto-exposure that s&box doesn't have - taste (and pack) varies, so expose a knob.
+			grid.AddCell( 2, 1, new Label( "Map light brightness", this ), alignment: TextFlag.RightCenter );
+			lightScaleEdit = new LineEdit( this )
+			{
+				Text = EditorCookie.Get( "unreal_import_light_scale", 1f ).ToString( System.Globalization.CultureInfo.InvariantCulture ),
+				ToolTip = "Multiplier on converted map light intensity. 1 = calibrated default; lower for moodier interiors, higher if too dark. Applies on (re)import.",
+			};
+			lightScaleEdit.TextEdited += _ => EditorCookie.Set( "unreal_import_light_scale", LightScale() );
+			grid.AddCell( 3, 1, lightScaleEdit, xSpan: 2 );
+
+			// Row 2: subfolder | generate LODs.
+			subfolderLabel = new Label( "Subfolder", this ) { FixedWidth = LabelWidth };
+			grid.AddCell( 0, 2, subfolderLabel );
 
 			subfolderEdit = new LineEdit( this )
 			{
@@ -632,41 +666,21 @@ public class UnrealImportWindow : Widget
 				if ( outputLabel is not null )
 					outputLabel.Text = OutputDisplay();
 			};
-			row.Add( subfolderEdit, 1 );
+			grid.AddCell( 1, 2, subfolderEdit );
 
-			layoutCombo.ItemChanged += () =>
+			lodCheckbox = new Checkbox( "Generate LODs", this )
 			{
-				EditorCookie.Set( "unreal_import_layout", layoutCombo.CurrentIndex );
-				UpdateLayoutRow();
+				Value = EditorCookie.Get( "unreal_import_lods", true ),
+				ToolTip = "5-level auto chain; untick for full detail at every distance",
 			};
+			lodCheckbox.Toggled = () => EditorCookie.Set( "unreal_import_lods", lodCheckbox.Value );
+			grid.AddCell( 2, 2, lodCheckbox, xSpan: 3 );
 
-			Layout.Add( row );
+			// Only the field columns absorb extra width; the label columns stay tight.
+			grid.SetColumnStretch( 0, 3, 0, 2, 0 );
+
+			Layout.Add( section );
 			UpdateLayoutRow();
-		}
-
-		lodCheckbox = new Checkbox( "Generate LODs (5-level auto chain; untick for full detail at every distance)", this )
-		{
-			Value = EditorCookie.Get( "unreal_import_lods", true ),
-		};
-		lodCheckbox.Toggled = () => EditorCookie.Set( "unreal_import_lods", lodCheckbox.Value );
-		Layout.Add( lodCheckbox );
-
-		// Scene-light brightness: the conversion is calibrated, but UE maps lean on
-		// auto-exposure that s&box doesn't have - taste (and pack) varies, so expose a knob.
-		{
-			var row = Layout.Row();
-			row.Spacing = 8;
-			row.Add( new Label( "Map light brightness ×", this ) );
-			lightScaleEdit = new LineEdit( this )
-			{
-				Text = EditorCookie.Get( "unreal_import_light_scale", 1f ).ToString( System.Globalization.CultureInfo.InvariantCulture ),
-				FixedWidth = 60,
-				ToolTip = "Multiplier on converted map light intensity. 1 = calibrated default; lower for moodier interiors, higher if too dark. Applies on (re)import.",
-			};
-			lightScaleEdit.TextEdited += _ => EditorCookie.Set( "unreal_import_light_scale", LightScale() );
-			row.Add( lightScaleEdit );
-			row.AddStretchCell();
-			Layout.Add( row );
 		}
 
 		statusLabel = new Label( "", this );
@@ -709,16 +723,25 @@ public class UnrealImportWindow : Widget
 		{
 			var assets = Sandbox.Project.Current?.GetAssetsPath();
 			if ( string.IsNullOrEmpty( assets ) )
-				return "Output: Assets/models + Assets/materials";
+				return "Assets/models + Assets/materials";
 
 			var paths = AssetImporter.ResolvePaths( outputFolder, assets, ImportLayout.ClassicSource, Subfolder() );
-			return $"Output: {paths.ModelsDir}  +  {paths.MaterialsDir}";
+			return $"{paths.ModelsDir}  +  {paths.MaterialsDir}";
 		}
 
-		return string.IsNullOrEmpty( outputFolder ) ? "No output folder" : $"Output: {outputFolder}";
+		if ( string.IsNullOrEmpty( outputFolder ) )
+			return "";
+
+		// Per Asset fans out into a folder per asset - show that rather than implying one folder.
+		return SelectedLayout == ImportLayout.PerAsset
+			? Path.Combine( outputFolder, "<asset>" )
+			: outputFolder;
 	}
 
-	/// <summary>The subfolder field only means anything in Classic Source; grey it out elsewhere.</summary>
+	/// <summary>
+	/// The subfolder field only means anything in Classic Source; grey it out elsewhere.
+	/// (Per Asset names its folders after the assets themselves, so there's nothing to type.)
+	/// </summary>
 	void UpdateLayoutRow()
 	{
 		var classic = SelectedLayout == ImportLayout.ClassicSource;

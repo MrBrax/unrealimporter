@@ -32,6 +32,13 @@ public enum ImportLayout
 	Flat,
 
 	/// <summary>
+	/// One self-contained folder per imported asset: &lt;output&gt;/&lt;asset&gt;/ holds its
+	/// model, materials and textures together. Shared materials are duplicated into each
+	/// asset's folder - that's the point, each folder can be moved or deleted on its own.
+	/// </summary>
+	PerAsset,
+
+	/// <summary>
 	/// Classic Source style: Assets/models/&lt;sub&gt; for fbx+vmdl, Assets/materials/&lt;sub&gt; for
 	/// vmat+textures, Assets/prefabs/&lt;sub&gt; for map prefabs. Ignores the picked output folder.
 	/// </summary>
@@ -72,6 +79,17 @@ public static class AssetImporter
 					TexturesDir = outputRoot,
 					PrefabDir = outputRoot,
 					Display = outputRoot,
+				};
+
+			case ImportLayout.PerAsset:
+				// These are the ROOT - Import() appends the per-asset folder as it goes.
+				return new ImportPaths
+				{
+					ModelsDir = outputRoot,
+					MaterialsDir = outputRoot,
+					TexturesDir = outputRoot,
+					PrefabDir = outputRoot,
+					Display = Path.Combine( outputRoot, "<asset>" ),
 				};
 
 			case ImportLayout.ClassicSource:
@@ -140,15 +158,26 @@ public static class AssetImporter
 		var paths = ResolvePaths( outputRoot, assetsDir, layout, subfolder );
 		var summary = new ImportSummary { OutputDir = paths.Display };
 
-		var modelsDir = paths.ModelsDir;
-		var materialsDir = paths.MaterialsDir;
-		var texturesDir = paths.TexturesDir;
-		Directory.CreateDirectory( modelsDir );
-		Directory.CreateDirectory( materialsDir );
-		Directory.CreateDirectory( texturesDir );
+		Directory.CreateDirectory( paths.ModelsDir );
+		Directory.CreateDirectory( paths.MaterialsDir );
+		Directory.CreateDirectory( paths.TexturesDir );
 
-		// Track shared materials/textures so we only process them once.
-		var writtenVmats = new Dictionary<string, string>();   // base -> vmat content path
+		// PerAsset puts every asset in its own self-contained folder; every other layout
+		// shares one set of directories for the whole import.
+		(string models, string materials, string textures) DirsFor( string assetName )
+		{
+			if ( layout != ImportLayout.PerAsset )
+				return (paths.ModelsDir, paths.MaterialsDir, paths.TexturesDir);
+
+			var dir = Path.Combine( paths.ModelsDir, assetName );
+			Directory.CreateDirectory( dir );
+			return (dir, dir, dir);
+		}
+
+		// Track materials we've already written so shared ones are processed once. Keyed by
+		// folder too: under PerAsset the same material is deliberately written into each
+		// asset's folder, so the name alone would wrongly dedupe it away.
+		var writtenVmats = new Dictionary<string, string>();   // "<dir>|<base>" -> vmat content path
 		var modelsByGamePath = new Dictionary<string, string>();   // /Game path -> vmdl content path
 		var mirroredByGamePath = new Dictionary<string, string>(); // /Game path -> mirrored vmdl content path
 
@@ -185,6 +214,7 @@ public static class AssetImporter
 			}
 
 			var modelName = Sanitize( asset.Asset );
+			var (modelsDir, materialsDir, texturesDir) = DirsFor( modelName );
 			var fbxDst = Path.Combine( modelsDir, modelName + ".fbx" );
 			File.Copy( fbxSrc, fbxDst, overwrite: true );
 
@@ -274,11 +304,13 @@ public static class AssetImporter
 			onProgress?.Invoke( manifest.Assets.Count + manifest.Materials.IndexOf( mat ) + 1, totalAssets, name );
 
 			var baseName = MaterialBaseName( mat );
-			var vmatContent = await WriteVmat( mat, baseName, stagingDir, assetsDir, materialsDir, texturesDir, writtenVmats, summary, progressToken );
+			// A standalone material is its own asset, so PerAsset folders it under its own name.
+			var (_, matDir, texDir) = DirsFor( baseName );
+			var vmatContent = await WriteVmat( mat, baseName, stagingDir, assetsDir, matDir, texDir, writtenVmats, summary, progressToken );
 
 			// Nothing compiles this one for us (a model would have pulled it in), so register
 			// it explicitly - otherwise it doesn't show in the asset browser until a rescan.
-			global::Editor.AssetSystem.RegisterFile( Path.Combine( materialsDir, baseName + ".vmat" ) );
+			global::Editor.AssetSystem.RegisterFile( Path.Combine( matDir, baseName + ".vmat" ) );
 
 			Log.Info( $"Imported material {name} -> {vmatContent}" );
 		}
@@ -304,7 +336,8 @@ public static class AssetImporter
 	static async Task<string> WriteVmat( ManifestMaterial mat, string baseName, string stagingDir, string assetsDir,
 		string materialsDir, string texturesDir, Dictionary<string, string> writtenVmats, ImportSummary summary, CancellationToken token )
 	{
-		if ( writtenVmats.TryGetValue( baseName, out var existing ) )
+		var cacheKey = $"{materialsDir}|{baseName}";
+		if ( writtenVmats.TryGetValue( cacheKey, out var existing ) )
 			return existing;
 
 		var emissive = EmissiveParams( mat );
@@ -344,7 +377,7 @@ public static class AssetImporter
 			summary.Warnings.Add( $"{baseName}: has a displacement/height map, which complex.shader can't use - ignored." );
 
 		var content = ToContentPath( assetsDir, vmatPath );
-		writtenVmats[baseName] = content;
+		writtenVmats[cacheKey] = content;
 		return content;
 	}
 
